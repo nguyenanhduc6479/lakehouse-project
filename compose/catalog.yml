@@ -1,17 +1,56 @@
 services:
-  polaris:
-    image: apache/polaris:latest
-    container_name: polaris
+  # Backend relational-jdbc BẮT BUỘC bootstrap schema + realm bằng admin-tool trước khi
+  # chạy server (docs Polaris 1.5.0: metastores/relational-jdbc.md).
+  # Docs nói lệnh idempotent nhưng thực tế 1.5.0 chạy lần 2 -> exit 3 "already been
+  # bootstrapped" -> mọi `up` sau sẽ chặn polaris. Nên bọc sh: coi đúng lỗi đó là OK,
+  # lỗi khác vẫn fail. Pin cùng version với server để schema DB khớp.
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:1.5.0
+    container_name: polaris-bootstrap
     depends_on:
-      # chờ postgres-setup hoàn thành vì cần database 'polaris' đã tồn tại
       postgres-setup:
         condition: service_completed_successfully
     environment:
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      QUARKUS_DATASOURCE_DB_KIND: postgresql
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB_POLARIS}
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_ADMIN_USERNAME}
+      QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_ADMIN_PASSWORD}
+      POLARIS_SECRET: ${POLARIS_SECRET}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        out=$$(java -jar /deployments/polaris-admin-tool.jar bootstrap --realm=POLARIS \
+          --credential="POLARIS,root,$$POLARIS_SECRET" 2>&1); rc=$$?
+        echo "$$out" | grep -v '^[[:space:]]*at '
+        if [ "$$rc" -ne 0 ] && echo "$$out" | grep -q 'already been bootstrapped'; then
+          echo "Realm POLARIS đã bootstrap trước đó -> bỏ qua."; exit 0
+        fi
+        exit "$$rc"
+    networks: [lakehouse]
+
+  polaris:
+    image: apache/polaris:1.5.0
+    container_name: polaris
+    depends_on:
+      # chờ bootstrap tạo schema/realm trong database 'polaris' (sau postgres-setup)
+      polaris-bootstrap:
+        condition: service_completed_successfully
+    environment:
       POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,${POLARIS_SECRET}
+      # Mặc định Polaris dùng metastore in-memory (log: "intended for tests only") -> mất hết
+      # catalog/bảng mỗi lần restart. Phải bật relational-jdbc thì quarkus.datasource mới có tác dụng.
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      POLARIS_REALM_CONTEXT_REALMS: POLARIS
       quarkus.datasource.jdbc.url: jdbc:postgresql://postgres:5432/${POSTGRES_DB_POLARIS}
       quarkus.datasource.username: ${POLARIS_ADMIN_USERNAME}
       quarkus.datasource.password: ${POLARIS_ADMIN_PASSWORD}
       quarkus.datasource.db-kind: postgresql
+      # Catalog đặt stsUnavailable=true (MinIO không dùng STS) -> Polaris tự đọc/ghi
+      # metadata.json trên MinIO bằng default AWS credential chain, nên cần key + region.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
     ports: ["8181:8181"]
     networks: [lakehouse]
     healthcheck:

@@ -11,10 +11,13 @@ apache-airflow-providers-trino==5.7.1          # Trino ad-hoc queries
 # datahub ingestion recipes
 acryl-datahub[airflow]==0.12.1.5
 
-# ingest OHLCV (task ingest trong DAG lakehouse_ohlcv) — vnstock 4.x giữ API
-# vnstock.api.quote.Quote().history (đã verify 2026-10-27); pin để tránh nhảy lên
-# gen5 (v5) đổi cách gọi. pandas/pyarrow để ghi parquet lên MinIO qua boto3 (đã có
-# sẵn từ provider amazon).
-vnstock==4.0.4
+# ingest OHLCV (task ingest trong DAG lakehouse_ohlcv).
+# TẠM GỠ vnstock: PyPI hiện không còn file nào cho package `vnstock` (simple index
+# rỗng, JSON API 404 — kiểm tra 2026-10-27) nên `vnstock==4.0.4` làm build image fail.
+# ingest_ohlcv.py import vnstock lazy (trong hàm) nên DAG vẫn parse được; chỉ task
+# ingest_landing lỗi lúc chạy cho tới khi có nguồn vnstock thay thế (đang thử vnstock3).
+# vnstock==4.0.4
+# pandas/pyarrow để ghi parquet lên MinIO qua boto3 (đã có sẵn từ provider amazon).
+# pyarrow phải khớp constraints-2.9.2 (pin 14.0.2), lệch là pip ResolutionImpossible.
 pandas==2.1.4
-pyarrow==15.0.2
+pyarrow==14.0.2

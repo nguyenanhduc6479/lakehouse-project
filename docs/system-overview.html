@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lakehouse System Overview</title>
+<meta name="description" content="Tổng quan hệ thống lakehouse local: kiến trúc, service, luồng medallion, catalog Polaris, vận hành và hạn chế đã biết.">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --surface-2: #f0f0ec;
+    --text: #1d1d1b;
+    --muted: #5f5f5a;
+    --border: #dcdcd6;
+    --accent: #2f5bd3;
+    --accent-soft: #e6ecfb;
+    --code-bg: #f2f2ee;
+    --ok: #1f7a4d;
+    --ok-soft: #e3f3ea;
+    --warn: #9a5b00;
+    --warn-soft: #fbf0dc;
+    --bad: #b3261e;
+    --bad-soft: #fbe5e3;
+    /* màu nhóm service trong sơ đồ */
+    --c-orch: #b26a00;  --c-orch-soft: #fdf1df;
+    --c-comp: #2f5bd3;  --c-comp-soft: #e6ecfb;
+    --c-store: #1f7a4d; --c-store-soft: #e3f3ea;
+    --c-cat: #7a3fb8;   --c-cat-soft: #f1e8fb;
+    --c-query: #0f7c86; --c-query-soft: #dff3f4;
+    --c-infra: #5f5f5a; --c-infra-soft: #ececE8;
+    --edge: #8a8a84;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141413;
+      --surface: #1c1c1a;
+      --surface-2: #242421;
+      --text: #ecebe6;
+      --muted: #a3a29b;
+      --border: #34342f;
+      --accent: #8aa8ff;
+      --accent-soft: #1f2a47;
+      --code-bg: #20201d;
+      --ok: #6fd3a0;   --ok-soft: #173326;
+      --warn: #f2b45a; --warn-soft: #3a2a12;
+      --bad: #ff8a80;  --bad-soft: #3d1c19;
+      --c-orch: #f2b45a;  --c-orch-soft: #3a2a12;
+      --c-comp: #8aa8ff;  --c-comp-soft: #1f2a47;
+      --c-store: #6fd3a0; --c-store-soft: #173326;
+      --c-cat: #c79bf2;   --c-cat-soft: #2e2140;
+      --c-query: #6fd0d8; --c-query-soft: #14353a;
+      --c-infra: #b8b7b0; --c-infra-soft: #2a2a27;
+      --edge: #77766f;
+      --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141413;
+    --surface: #1c1c1a;
+    --surface-2: #242421;
+    --text: #ecebe6;
+    --muted: #a3a29b;
+    --border: #34342f;
+    --accent: #8aa8ff;
+    --accent-soft: #1f2a47;
+    --code-bg: #20201d;
+    --ok: #6fd3a0;   --ok-soft: #173326;
+    --warn: #f2b45a; --warn-soft: #3a2a12;
+    --bad: #ff8a80;  --bad-soft: #3d1c19;
+    --c-orch: #f2b45a;  --c-orch-soft: #3a2a12;
+    --c-comp: #8aa8ff;  --c-comp-soft: #1f2a47;
+    --c-store: #6fd3a0; --c-store-soft: #173326;
+    --c-cat: #c79bf2;   --c-cat-soft: #2e2140;
+    --c-query: #6fd0d8; --c-query-soft: #14353a;
+    --c-infra: #b8b7b0; --c-infra-soft: #2a2a27;
+    --edge: #77766f;
+    --shadow: none;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15.5px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, kbd { font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ---------- layout ---------- */
+  .wrap {
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 0 16px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+  @media (min-width: 1000px) {
+    .wrap { grid-template-columns: 230px minmax(0, 1fr); padding: 0 32px; }
+  }
+  main { min-width: 0; padding-bottom: 80px; }
+
+  /* ---------- header ---------- */
+  header.top {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header.top .inner {
+    max-width: 1240px; margin: 0 auto; padding: 28px 16px 24px;
+    display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap;
+  }
+  @media (min-width: 1000px) { header.top .inner { padding: 36px 32px 28px; } }
+  .eyebrow { font-size: 12.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+  h1 { font-size: clamp(26px, 4vw, 36px); line-height: 1.15; margin: 0 0 10px; letter-spacing: -.01em; }
+  .lede { margin: 0; color: var(--muted); max-width: 70ch; }
+  .theme-btn {
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+    border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13.5px; cursor: pointer;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .chip.ok   { background: var(--ok-soft);   border-color: transparent; color: var(--ok); }
+  .chip.ok .dot { background: var(--ok); }
+  .chip.warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+  .chip.warn .dot { background: var(--warn); }
+
+  /* ---------- toc ---------- */
+  nav.toc { font-size: 14px; }
+  nav.toc details { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-top: 20px; }
+  nav.toc summary { cursor: pointer; padding: 10px 14px; font-weight: 600; }
+  nav.toc ol { list-style: none; margin: 0; padding: 4px 8px 12px; counter-reset: toc; }
+  nav.toc li a {
+    display: block; padding: 5px 8px; border-radius: 6px; color: var(--muted);
+    border-left: 2px solid transparent;
+  }
+  nav.toc li a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+  nav.toc li a.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
+  @media (min-width: 1000px) {
+    nav.toc { position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow: auto; }
+    nav.toc details { border: 0; background: transparent; margin-top: 32px; }
+    nav.toc summary { list-style: none; padding: 0 8px 8px; font-size: 12.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); cursor: default; }
+    nav.toc summary::-webkit-details-marker { display: none; }
+    nav.toc ol { padding: 0; }
+  }
+
+  /* ---------- content ---------- */
+  section { padding-top: 36px; scroll-margin-top: 16px; }
+  h2 {
+    font-size: 23px; line-height: 1.25; margin: 0 0 14px; letter-spacing: -.005em;
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  h2 .num { font-size: 14px; color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+  h3 { font-size: 17px; margin: 26px 0 10px; }
+  p { margin: 0 0 14px; max-width: 78ch; }
+  ul { margin: 0 0 14px; padding-left: 20px; max-width: 80ch; }
+  li { margin: 4px 0; }
+  code {
+    font-size: .88em; background: var(--code-bg); border: 1px solid var(--border);
+    padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; margin: 0 0 16px;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; overflow-wrap: normal; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; box-shadow: var(--shadow); margin: 0 0 16px;
+  }
+  .note {
+    border-left: 3px solid var(--warn); background: var(--warn-soft);
+    padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 0 0 16px; max-width: 80ch;
+  }
+  .note.info { border-left-color: var(--accent); background: var(--accent-soft); }
+
+  /* ---------- tables ---------- */
+  .table-wrap { overflow-x: auto; margin: 0 0 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface-2); font-weight: 600; font-size: 13px; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
+  td.wrap-code code { white-space: normal; }
+
+  /* ---------- diagram ---------- */
+  figure { margin: 0 0 18px; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; overflow-x: auto; }
+  .diagram svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 11px; height: 11px; border-radius: 3px; display: inline-block; border: 1.5px solid; }
+
+  svg .node rect { stroke-width: 1.5; }
+  svg .node text { font: 600 13px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--text); }
+  svg .node text.sub { font-weight: 400; font-size: 11.5px; fill: var(--muted); }
+  svg .edge { stroke: var(--edge); stroke-width: 1.6; fill: none; }
+  svg .edge.dash { stroke-dasharray: 5 4; }
+  svg .elabel { font: 11.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); }
+  svg .orch rect  { fill: var(--c-orch-soft);  stroke: var(--c-orch); }
+  svg .comp rect  { fill: var(--c-comp-soft);  stroke: var(--c-comp); }
+  svg .store rect { fill: var(--c-store-soft); stroke: var(--c-store); }
+  svg .cat rect   { fill: var(--c-cat-soft);   stroke: var(--c-cat); }
+  svg .query rect { fill: var(--c-query-soft); stroke: var(--c-query); }
+  svg .infra rect { fill: var(--c-infra-soft); stroke: var(--c-infra); }
+  svg .src rect   { fill: var(--surface-2); stroke: var(--edge); stroke-dasharray: 5 4; }
+  svg marker path { fill: var(--edge); }
+
+  /* ---------- medallion flow ---------- */
+  .flow { display: grid; grid-template-columns: 1fr; gap: 10px; margin: 0 0 18px; }
+  @media (min-width: 760px) { .flow { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; } }
+  .stage {
+    position: relative; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 14px 12px; border-top: 4px solid var(--c);
+  }
+  @media (min-width: 760px) {
+    .stage { margin-right: 22px; }
+    .stage:last-child { margin-right: 0; }
+    .stage:not(:last-child)::after {
+      content: "→"; position: absolute; right: -19px; top: 50%; transform: translateY(-50%);
+      color: var(--muted); font-size: 16px;
+    }
+  }
+  .stage .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--c); font-weight: 700; }
+  .stage .t { font-weight: 650; margin: 2px 0 6px; font-size: 14.5px; overflow-wrap: anywhere; }
+  .stage .d { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .stage.ingest { --c: var(--c-orch); }
+  .stage.bronze { --c: #a0652b; }
+  .stage.silver { --c: #7d8a96; }
+  .stage.gold   { --c: #b8901c; }
+  .stage.q      { --c: var(--c-query); }
+
+  /* ---------- grids ---------- */
+  /* minmax(0,…): không để <pre> bên trong card nới rộng cột vượt màn hình */
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .grid2 > * { min-width: 0; }
+  @media (min-width: 760px) { .grid2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  .stat { font-size: 28px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-label { color: var(--muted); font-size: 13px; }
+  .stats { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin: 0 0 18px; }
+  @media (min-width: 760px) { .stats { grid-template-columns: repeat(4, minmax(0,1fr)); } }
+  .stats .card { margin: 0; padding: 14px 16px; }
+
+  .ok-text { color: var(--ok); font-weight: 600; }
+  footer { color: var(--muted); font-size: 13px; padding: 28px 0 0; border-top: 1px solid var(--border); margin-top: 40px; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="inner">
+    <div>
+      <p class="eyebrow">lakehouse-project · tài liệu hệ thống</p>
+      <h1>Lakehouse local: tổng quan hệ thống</h1>
+      <p class="lede">Lakehouse chạy hoàn toàn bằng Docker Compose: MinIO, Polaris, Spark, Trino, Airflow và DataHub, cùng một pipeline medallion cho giá cổ phiếu Việt Nam theo ngày.</p>
+      <div class="chips">
+        <span class="chip ok"><span class="dot"></span>Hạ tầng đã kiểm thử 2026-10-27</span>
+        <span class="chip warn"><span class="dot"></span>Pipeline chưa chạy end-to-end (nguồn vnstock bị chặn)</span>
+        <span class="chip"><span class="dot"></span>WSL2 Ubuntu + Docker Desktop</span>
+      </div>
+    </div>
+    <button class="theme-btn" id="themeBtn" type="button" aria-label="Đổi giao diện sáng/tối">Sáng / tối</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav class="toc" aria-label="Mục lục">
+    <details open id="tocDetails">
+      <summary>Mục lục</summary>
+      <ol>
+        <li><a href="#s1">1. Hệ thống này là gì</a></li>
+        <li><a href="#s2">2. Kiến trúc</a></li>
+        <li><a href="#s3">3. Danh sách service</a></li>
+        <li><a href="#s4">4. Chuỗi khởi động</a></li>
+        <li><a href="#s5">5. Luồng medallion</a></li>
+        <li><a href="#s6">6. Catalog Polaris</a></li>
+        <li><a href="#s7">7. Engine ↔ catalog</a></li>
+        <li><a href="#s8">8. Điều phối: Airflow</a></li>
+        <li><a href="#s9">9. DataHub</a></li>
+        <li><a href="#s10">10. Cấu hình &amp; lưu trữ</a></li>
+        <li><a href="#s11">11. Trạng thái &amp; hạn chế</a></li>
+        <li><a href="#s12">12. Vận hành</a></li>
+        <li><a href="#s13">13. Phụ lục: các bẫy đã gặp</a></li>
+      </ol>
+    </details>
+  </nav>
+
+  <main>
+
+    <!-- 1 -->
+    <section id="s1">
+      <h2><span class="num">01</span>Hệ thống này là gì</h2>
+      <p>Một <strong>lakehouse chạy local</strong> dựng hoàn toàn bằng Docker Compose. Lưu trữ object, catalog bảng, xử lý, truy vấn, điều phối và quản lý metadata đều chạy trên <strong>một mạng Docker duy nhất</strong> (<code>lakehouse</code>), các service gọi nhau bằng tên container.</p>
+      <p>Bài toán demo là một <strong>pipeline medallion</strong> cho giá cổ phiếu Việt Nam theo ngày (OHLCV). Mỗi tầng là một <strong>bảng Apache Iceberg</strong> thật, đăng ký trong catalog <strong>Apache Polaris</strong>, dữ liệu nằm trên <strong>MinIO</strong>. Vì vậy Spark ghi và Trino đọc được cùng một bảng.</p>
+
+      <div class="flow" role="list" aria-label="Luồng dữ liệu medallion">
+        <div class="stage ingest" role="listitem">
+          <div class="k">Ingest</div>
+          <div class="t">vnstock → landing</div>
+          <div class="d">Parquet tại <code>s3://lakehouse/bronze/_landing/</code></div>
+        </div>
+        <div class="stage bronze" role="listitem">
+          <div class="k">Bronze</div>
+          <div class="t">bronze.stock_ohlcv</div>
+          <div class="d">Dữ liệu thô, khử trùng lặp theo symbol + ngày</div>
+        </div>
+        <div class="stage silver" role="listitem">
+          <div class="k">Silver</div>
+          <div class="t">silver.stock_ohlcv</div>
+          <div class="d">Làm sạch, kiểm tra chất lượng</div>
+        </div>
+        <div class="stage gold" role="listitem">
+          <div class="k">Gold</div>
+          <div class="t">gold.stock_daily_metrics</div>
+          <div class="d">Lợi suất, MA5/MA20, biên độ</div>
+        </div>
+        <div class="stage q" role="listitem">
+          <div class="k">Query</div>
+          <div class="t">Trino</div>
+          <div class="d">Catalog <code>lakehouse</code></div>
+        </div>
+      </div>
+
+      <p>Cố ý giữ nhỏ: 5 mã (<code>FPT, VNM, ACB, HPG, MWG</code>), mỗi lần chạy <strong>ghi đè toàn bộ</strong> bảng (<code>createOrReplace</code>) để luồng dễ theo dõi; muốn incremental thì đổi sang <code>MERGE INTO</code>.</p>
+    </section>
+
+    <!-- 2 -->
+    <section id="s2">
+      <h2><span class="num">02</span>Kiến trúc</h2>
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 510" role="img" aria-labelledby="archTitle archDesc">
+            <title id="archTitle">Sơ đồ kiến trúc lakehouse</title>
+            <desc id="archDesc">Airflow kéo dữ liệu từ vnstock, ghi parquet vào MinIO và submit job Spark qua REST. Spark và Trino dùng catalog Polaris qua Iceberg REST với OAuth2, đọc ghi data file trên MinIO. Polaris lưu metadata trong Postgres. DataHub dùng Kafka, Elasticsearch và Postgres.</desc>
+            <defs>
+              <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z"/>
+              </marker>
+            </defs>
+
+            <!-- edges -->
+            <path class="edge" d="M180 58 H326" marker-end="url(#arr)"/>
+            <text class="elabel" x="253" y="50" text-anchor="middle">gọi API</text>
+
+            <path class="edge" d="M350 90 V140 H115 V196" marker-end="url(#arr)"/>
+            <text class="elabel" x="232" y="132" text-anchor="middle">parquet → landing</text>
+
+            <path class="edge" d="M470 90 V196" marker-end="url(#arr)"/>
+            <text class="elabel" x="480" y="150">submit REST :6066</text>
+
+            <path class="edge" d="M330 232 H204" marker-end="url(#arr)"/>
+            <text class="elabel" x="267" y="224" text-anchor="middle">data file (S3)</text>
+
+            <path class="edge" d="M550 232 H636" marker-end="url(#arr)"/>
+            <text class="elabel" x="593" y="224" text-anchor="middle">Iceberg REST</text>
+
+            <path class="edge" d="M550 356 H605 V250 H636" marker-end="url(#arr)"/>
+            <text class="elabel" x="560" y="300">REST +</text>
+            <text class="elabel" x="560" y="314">OAuth2</text>
+
+            <path class="edge" d="M330 372 H115 V268" marker-end="url(#arr)"/>
+            <text class="elabel" x="222" y="364" text-anchor="middle">S3 đọc / ghi</text>
+
+            <path class="edge" d="M745 264 V336" marker-end="url(#arr)"/>
+            <text class="elabel" x="755" y="305">JDBC</text>
+
+            <path class="edge dash" d="M690 264 Q690 286 640 286 H215 Q200 286 200 262" marker-end="url(#arr)"/>
+            <text class="elabel" x="420" y="280" text-anchor="middle">metadata.json</text>
+
+            <path class="edge" d="M745 440 V408" marker-end="url(#arr)"/>
+
+            <!-- nodes -->
+            <g class="node src">
+              <rect x="30" y="30" width="150" height="56" rx="10"/>
+              <text x="105" y="54" text-anchor="middle">vnstock</text>
+              <text class="sub" x="105" y="72" text-anchor="middle">nguồn OHLCV (VCI)</text>
+            </g>
+            <g class="node orch">
+              <rect x="330" y="26" width="220" height="64" rx="10"/>
+              <text x="440" y="52" text-anchor="middle">Airflow 2.9.2</text>
+              <text class="sub" x="440" y="71" text-anchor="middle">DAG lakehouse_ohlcv · :8085</text>
+            </g>
+            <g class="node store">
+              <rect x="30" y="200" width="170" height="64" rx="10"/>
+              <text x="115" y="226" text-anchor="middle">MinIO</text>
+              <text class="sub" x="115" y="245" text-anchor="middle">s3://lakehouse · :9000</text>
+            </g>
+            <g class="node comp">
+              <rect x="330" y="200" width="220" height="64" rx="10"/>
+              <text x="440" y="226" text-anchor="middle">Spark 3.5.1</text>
+              <text class="sub" x="440" y="245" text-anchor="middle">master · worker · thrift · history</text>
+            </g>
+            <g class="node cat">
+              <rect x="640" y="200" width="210" height="64" rx="10"/>
+              <text x="745" y="226" text-anchor="middle">Polaris 1.5.0</text>
+              <text class="sub" x="745" y="245" text-anchor="middle">Iceberg REST catalog · :8181</text>
+            </g>
+            <g class="node query">
+              <rect x="330" y="340" width="220" height="64" rx="10"/>
+              <text x="440" y="366" text-anchor="middle">Trino 454</text>
+              <text class="sub" x="440" y="385" text-anchor="middle">SQL query · :8080</text>
+            </g>
+            <g class="node infra">
+              <rect x="640" y="340" width="210" height="64" rx="10"/>
+              <text x="745" y="366" text-anchor="middle">Postgres 15</text>
+              <text class="sub" x="745" y="385" text-anchor="middle">airflow · polaris · datahub</text>
+            </g>
+            <g class="node infra">
+              <rect x="30" y="440" width="820" height="50" rx="10"/>
+              <text x="440" y="462" text-anchor="middle">DataHub v0.12.1 (lineage &amp; metadata) · :9002</text>
+              <text class="sub" x="440" y="479" text-anchor="middle">Kafka · Zookeeper · Elasticsearch · schema-registry · nhận lineage từ Spark &amp; Airflow</text>
+            </g>
+          </svg>
+        </div>
+        <div class="legend" aria-hidden="true">
+          <span><i style="background:var(--c-orch-soft);border-color:var(--c-orch)"></i>Điều phối</span>
+          <span><i style="background:var(--c-comp-soft);border-color:var(--c-comp)"></i>Xử lý</span>
+          <span><i style="background:var(--c-store-soft);border-color:var(--c-store)"></i>Lưu trữ</span>
+          <span><i style="background:var(--c-cat-soft);border-color:var(--c-cat)"></i>Catalog</span>
+          <span><i style="background:var(--c-query-soft);border-color:var(--c-query)"></i>Truy vấn</span>
+          <span><i style="background:var(--c-infra-soft);border-color:var(--c-infra)"></i>Hạ tầng dùng chung</span>
+        </div>
+        <figcaption>Mọi service nằm trên một mạng Docker <code>lakehouse</code>. Nét đứt: Polaris tự đọc/ghi file metadata trên MinIO. Airflow cũng dùng Postgres làm metadata DB (không vẽ để sơ đồ gọn).</figcaption>
+      </figure>
+
+      <p><code>docker-compose.yml</code> chỉ <code>include</code> 7 module trong <code>compose/</code> và khai báo mạng chung:</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Module</th><th>Service chính</th></tr></thead>
+        <tbody>
+          <tr><td><code>infra.yml</code></td><td>Postgres 15, Zookeeper, Kafka, Elasticsearch 7.17</td></tr>
+          <tr><td><code>storage.yml</code></td><td>MinIO</td></tr>
+          <tr><td><code>catalog.yml</code></td><td>Polaris (+ bootstrap, setup)</td></tr>
+          <tr><td><code>datahub.yml</code></td><td>DataHub GMS, frontend, actions, schema-registry</td></tr>
+          <tr><td><code>spark.yml</code></td><td>Spark master, worker, thrift, history</td></tr>
+          <tr><td><code>trino.yml</code></td><td>Trino</td></tr>
+          <tr><td><code>airflow.yml</code></td><td>Airflow init, webserver, scheduler</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 3 -->
+    <section id="s3">
+      <h2><span class="num">03</span>Danh sách service (27 container)</h2>
+      <div class="stats">
+        <div class="card"><div class="stat">27</div><div class="stat-label">container</div></div>
+        <div class="card"><div class="stat">17</div><div class="stat-label">chạy lâu dài</div></div>
+        <div class="card"><div class="stat">16</div><div class="stat-label">healthy</div></div>
+        <div class="card"><div class="stat">10</div><div class="stat-label">job one-shot, thoát mã 0</div></div>
+      </div>
+
+      <h3>Service chạy lâu dài (17)</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Service</th><th>Image</th><th>Vai trò</th><th>Cổng host</th></tr></thead>
+        <tbody>
+          <tr><td><code>postgres</code></td><td><code>postgres:15</code></td><td>DB dùng chung cho Airflow, Polaris, DataHub</td><td>5432</td></tr>
+          <tr><td><code>minio</code></td><td><code>minio/minio</code></td><td>Object storage S3, chứa toàn bộ data file</td><td>9000 (API), 9001 (console)</td></tr>
+          <tr><td><code>polaris</code></td><td><code>apache/polaris:1.5.0</code></td><td>Iceberg REST catalog, OAuth2</td><td>8181</td></tr>
+          <tr><td><code>spark-master</code></td><td><code>custom-spark:3.5.1</code></td><td>Spark master + REST submit</td><td>8090 (UI), 7077 (RPC), 6066 (REST)</td></tr>
+          <tr><td><code>spark-worker</code></td><td><code>custom-spark:3.5.1</code></td><td>Executor/driver (2 core, 2 GB)</td><td>8081</td></tr>
+          <tr><td><code>spark-thrift</code></td><td><code>custom-spark:3.5.1</code></td><td>Hive Thrift JDBC cho dbt</td><td>10000, 4040 (UI)</td></tr>
+          <tr><td><code>spark-history</code></td><td><code>custom-spark:3.5.1</code></td><td>Spark History Server</td><td>18080</td></tr>
+          <tr><td><code>trino</code></td><td><code>trinodb/trino:454</code></td><td>SQL query engine</td><td>8080</td></tr>
+          <tr><td><code>airflow-webserver</code></td><td><code>custom-airflow:2.9.2</code></td><td>Airflow UI</td><td>8085</td></tr>
+          <tr><td><code>airflow-scheduler</code></td><td><code>custom-airflow:2.9.2</code></td><td>Lập lịch + chạy task (LocalExecutor)</td><td>—</td></tr>
+          <tr><td><code>zookeeper</code></td><td><code>cp-zookeeper:7.6.0</code></td><td>Điều phối Kafka</td><td>—</td></tr>
+          <tr><td><code>kafka</code></td><td><code>cp-kafka:7.6.0</code></td><td>Message bus cho DataHub</td><td>—</td></tr>
+          <tr><td><code>elasticsearch</code></td><td><code>elasticsearch:7.17.10</code></td><td>Search + graph store cho DataHub</td><td>—</td></tr>
+          <tr><td><code>schema-registry</code></td><td><code>cp-schema-registry:7.6.0</code></td><td>Schema registry DataHub cần</td><td>—</td></tr>
+          <tr><td><code>datahub-gms</code></td><td><code>datahub-gms:v0.12.1</code></td><td>API metadata</td><td>8083</td></tr>
+          <tr><td><code>datahub-frontend-react</code></td><td><code>datahub-frontend-react:v0.12.1</code></td><td>UI DataHub</td><td>9002</td></tr>
+          <tr><td><code>datahub-actions</code></td><td><code>datahub-actions:v0.0.14</code></td><td>Actions framework</td><td>—</td></tr>
+        </tbody>
+      </table></div>
+      <p class="note info">"—" = chỉ truy cập được trong mạng Docker (đã kiểm tra bằng <code>docker ps</code>). Kafka quảng bá listener <code>localhost:9092</code> nhưng <strong>không publish cổng</strong>, nên từ host không kết nối được.</p>
+
+      <h3>Job chạy một lần (10)</h3>
+      <p>Các job này chạy xong thoát mã <code>0</code>; service phía sau chờ bằng <code>service_completed_successfully</code>.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Job</th><th>Làm gì</th></tr></thead>
+        <tbody>
+          <tr><td><code>postgres-setup</code></td><td>Tạo role + database <code>airflow</code>, <code>polaris</code>, <code>datahub</code> (idempotent)</td></tr>
+          <tr><td><code>minio-setup</code></td><td>Tạo bucket <code>lakehouse</code> với prefix <code>bronze/ silver/ gold/</code> (bỏ qua nếu đã có)</td></tr>
+          <tr><td><code>polaris-bootstrap</code></td><td><code>polaris-admin-tool bootstrap</code>: tạo schema + realm <code>POLARIS</code> trong Postgres</td></tr>
+          <tr><td><code>polaris-setup</code></td><td>Tạo/cập nhật catalog <code>lakehouse</code>, cấp quyền, tạo namespace</td></tr>
+          <tr><td><code>spark-fix-permissions</code></td><td><code>chown 185</code> volume event log để Spark (UID 185) ghi được</td></tr>
+          <tr><td><code>airflow-init</code></td><td><code>db migrate</code>, tạo admin, tạo 5 Airflow connection</td></tr>
+          <tr><td><code>kafka-setup</code></td><td>Tạo trước 5 topic DataHub</td></tr>
+          <tr><td><code>datahub-elasticsearch-setup</code></td><td>Tạo index Elasticsearch</td></tr>
+          <tr><td><code>datahub-postgres-setup</code></td><td>Tạo schema DataHub trong Postgres</td></tr>
+          <tr><td><code>datahub-upgrade</code></td><td><code>SystemUpdate</code> của DataHub</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 4 -->
+    <section id="s4">
+      <h2><span class="num">04</span>Chuỗi khởi động</h2>
+      <p>Phần lớn <code>depends_on</code> dùng <code>service_healthy</code> hoặc <code>service_completed_successfully</code>, nên các service khởi động đúng thứ tự, không chạy đua nhau:</p>
+<pre><code>postgres ─▶ postgres-setup ─┬─▶ polaris-bootstrap ─▶ polaris ─┬─▶ polaris-setup (cần cả minio-setup)
+                            │                                 └─▶ trino
+                            └─▶ airflow-init ─▶ airflow-webserver, airflow-scheduler
+minio ─▶ minio-setup
+spark-master ─▶ spark-worker, spark-history;  spark-fix-permissions + spark-master ─▶ spark-thrift
+zookeeper ─▶ kafka ─┬─▶ kafka-setup ─────────────────┐
+                    └─▶ schema-registry ─────────────┤
+elasticsearch ─▶ datahub-elasticsearch-setup ────────┼─▶ datahub-upgrade ─▶ datahub-gms ─┬─▶ datahub-frontend-react
+postgres-setup ─▶ datahub-postgres-setup ────────────┘                                  └─▶ datahub-actions</code></pre>
+      <p>Lần <code>docker compose up -d</code> thứ N vẫn thành công: mọi job setup đều idempotent (đã kiểm tra).</p>
+    </section>
+
+    <!-- 5 -->
+    <section id="s5">
+      <h2><span class="num">05</span>Luồng dữ liệu medallion</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Tầng</th><th>Code</th><th>Đầu vào → đầu ra</th><th>Logic chính</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Ingest</strong></td><td class="wrap-code"><code>airflow/plugins/ingest_ohlcv.py</code></td><td class="wrap-code"><code>vnstock</code> → <code>s3://lakehouse/bronze/_landing/stock_ohlcv/ingest_date=YYYY-MM-DD/data.parquet</code></td><td>Kéo OHLCV từng mã (nguồn VCI), gắn <code>symbol</code>, <code>source</code>, <code>ingested_at</code>; ghi parquet qua <code>boto3</code>. Mã lỗi thì bỏ qua; không mã nào có dữ liệu thì fail.</td></tr>
+          <tr><td><strong>Bronze</strong></td><td class="wrap-code"><code>spark/jobs/job_bronze.py</code></td><td class="wrap-code">landing parquet → <code>lakehouse.bronze.stock_ohlcv</code></td><td><code>time</code> → <code>trade_date</code>; khử trùng lặp theo <code>(symbol, trade_date)</code>, giữ bản có <code>ingested_at</code> mới nhất. Schema đọc khai báo tường minh.</td></tr>
+          <tr><td><strong>Silver</strong></td><td class="wrap-code"><code>spark/jobs/job_silver.py</code></td><td class="wrap-code">bronze → <code>lakehouse.silver.stock_ohlcv</code></td><td>Luật chất lượng: khoá không null, giá &gt; 0, volume ≥ 0, ràng buộc nến (<code>high ≥ low</code>, <code>high ≥ max(open, close)</code>, <code>low ≤ min(open, close)</code>). Log số dòng giữ/loại; fail nếu rỗng.</td></tr>
+          <tr><td><strong>Gold</strong></td><td class="wrap-code"><code>spark/jobs/job_gold.py</code></td><td class="wrap-code">silver → <code>lakehouse.gold.stock_daily_metrics</code></td><td><code>prev_close</code>, <code>daily_return</code>, <code>ma5</code>, <code>ma20</code>, <code>range_pct</code>. Window tính <strong>riêng trong từng mã</strong> theo <code>trade_date</code>. Fail nếu rỗng.</td></tr>
+          <tr><td><strong>Query</strong></td><td>Trino</td><td>bảng gold</td><td class="wrap-code"><code>SELECT … FROM lakehouse.gold.stock_daily_metrics</code></td></tr>
+        </tbody>
+      </table></div>
+      <h3>Đặc điểm chung</h3>
+      <ul>
+        <li><strong>Idempotent.</strong> Ingest ghi đè file theo <code>ingest_date</code>, nên chạy lại trong ngày không sinh rác. Các job Spark dùng <code>createOrReplace()</code>.</li>
+        <li><strong>Bảng Iceberg</strong> dùng format v2, partition theo <code>symbol</code>, nằm tại <code>s3://lakehouse/&lt;namespace&gt;/&lt;bảng&gt;</code> (location mặc định của catalog).</li>
+        <li><strong>Logic transform tách thành hàm thuần</strong> (<code>transform_bronze</code>, <code>clean_silver</code>, <code>build_gold</code>), nên test được bằng DataFrame dựng tay, không cần MinIO hay Polaris.</li>
+      </ul>
+    </section>
+
+    <!-- 6 -->
+    <section id="s6">
+      <h2><span class="num">06</span>Catalog: Apache Polaris</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Khía cạnh</th><th>Cấu hình</th></tr></thead>
+        <tbody>
+          <tr><td>Endpoint</td><td><code>http://polaris:8181/api/catalog</code>, warehouse/prefix <code>lakehouse</code></td></tr>
+          <tr><td>Xác thực</td><td>OAuth2 client-credentials <code>root</code> / <code>POLARIS_SECRET</code>, <strong>scope <code>PRINCIPAL_ROLE:ALL</code> bắt buộc</strong></td></tr>
+          <tr><td>Lưu metadata</td><td>Postgres qua <code>POLARIS_PERSISTENCE_TYPE=relational-jdbc</code> (database <code>polaris</code>)</td></tr>
+          <tr><td>Storage của catalog</td><td class="wrap-code">S3: <code>endpoint</code> = MinIO, <code>pathStyleAccess=true</code>, <code>stsUnavailable=true</code>, <code>region=us-east-1</code>, <code>allowedLocations=s3://lakehouse/</code></td></tr>
+          <tr><td>Quyền</td><td><code>catalog_admin</code> được cấp thêm <code>CATALOG_MANAGE_CONTENT</code> (cần cho <code>DROP TABLE</code> purge và báo cáo metrics)</td></tr>
+          <tr><td>Thuộc tính catalog</td><td class="wrap-code"><code>polaris.config.drop-with-purge.enabled=true</code></td></tr>
+          <tr><td>Namespace</td><td><code>bronze</code>, <code>silver</code>, <code>gold</code>, tạo qua Iceberg REST API</td></tr>
+          <tr><td>Health</td><td><code>/q/health</code> trên cổng 8182, <strong>chỉ trong container</strong></td></tr>
+        </tbody>
+      </table></div>
+      <p>Vì <code>stsUnavailable=true</code>, Polaris <strong>không cấp credential tạm</strong> (credential vending) cho client. Mỗi engine tự mang key MinIO của mình. Bản thân Polaris đọc/ghi file metadata bằng biến môi trường <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_REGION</code>.</p>
+    </section>
+
+    <!-- 7 -->
+    <section id="s7">
+      <h2><span class="num">07</span>Engine kết nối catalog như thế nào</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th></th><th>Spark (<code>spark/jobs/common.py</code>)</th><th>Trino (<code>trino/catalog/lakehouse.properties</code>)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Catalog</strong></td><td class="wrap-code"><code>SparkCatalog</code>, <code>type=rest</code>, <code>uri</code>, <code>warehouse=lakehouse</code></td><td class="wrap-code"><code>iceberg.catalog.type=rest</code>, <code>rest-catalog.uri</code>, <code>warehouse</code></td></tr>
+          <tr><td><strong>OAuth2</strong></td><td class="wrap-code"><code>credential=root:&lt;secret&gt;</code>, <code>scope=PRINCIPAL_ROLE:ALL</code></td><td class="wrap-code"><code>oauth2.credential</code>, <code>oauth2.scope</code> (cần Trino ≥ 454)</td></tr>
+          <tr><td><strong>Data file</strong></td><td class="wrap-code"><code>S3FileIO</code> + <code>s3.endpoint</code>, <code>path-style-access</code>, key MinIO</td><td class="wrap-code"><code>fs.native-s3.enabled</code>, <code>s3.endpoint</code>, <code>s3.region</code>, <code>s3.path-style-access</code>, key</td></tr>
+          <tr><td><strong>Đọc landing</strong></td><td class="wrap-code"><code>fs.s3a.*</code> (hadoop-aws) để đọc parquet thô</td><td>—</td></tr>
+          <tr><td><strong>Secret</strong></td><td class="wrap-code">env <code>MINIO_*</code>, <code>POLARIS_SECRET</code></td><td class="wrap-code"><code>${ENV:MINIO_*}</code>, <code>${ENV:POLARIS_SECRET}</code></td></tr>
+        </tbody>
+      </table></div>
+      <p>Image <code>custom-spark:3.5.1</code> (từ <code>apache/spark:3.5.1</code>) có thêm các JAR: <code>hadoop-aws 3.3.4</code>, <code>iceberg-spark-runtime-3.5_2.12 1.5.2</code>, <code>iceberg-aws-bundle 1.5.2</code>, <code>postgresql 42.6.0</code>, <code>acryl-spark-lineage 0.2.18</code>, <code>kafka-clients 3.6.0</code>; và Python <code>pandas</code>, <code>pyarrow</code>, <code>fastparquet</code>. Python trong container là <strong>3.8.10</strong>. <code>spark-defaults.conf</code> chỉ cấu hình event log và múi giờ; cấu hình catalog nằm trong <code>common.py</code>.</p>
+    </section>
+
+    <!-- 8 -->
+    <section id="s8">
+      <h2><span class="num">08</span>Điều phối: Airflow</h2>
+      <ul>
+        <li><strong>DAG</strong> <code>lakehouse_ohlcv</code> (<code>airflow/dags/lakehouse_ohlcv_dag.py</code>): <code>ingest_landing</code> → <code>build_bronze</code> → <code>build_silver</code> → <code>build_gold</code>. Lịch <code>0 18 * * 1-5</code> (18:00 thứ 2–6, giờ <code>Asia/Ho_Chi_Minh</code>), <code>catchup=False</code>, <code>retries=1</code>. DAG mới tạo mặc định ở trạng thái <strong>paused</strong>.</li>
+        <li><strong>Submit Spark</strong> qua <strong>Spark Standalone REST API</strong> <code>spark-master:6066</code> (<code>airflow/plugins/spark_rest.py</code>), deploy mode <strong>cluster</strong>: driver chạy trên <code>spark-worker</code>, nên Airflow không cần Java hay <code>spark-submit</code>. Task chờ trạng thái driver <code>FINISHED</code> (timeout 30 phút); gặp <code>FAILED</code>, <code>ERROR</code> hoặc <code>KILLED</code> thì fail.</li>
+        <li><strong>Ingest</strong> chạy ngay trong scheduler (<code>PythonOperator</code>), đọc <code>MINIO_*</code> từ env.</li>
+        <li><strong>Connections</strong> do <code>airflow/scripts/init.sh</code> tạo bằng code (xoá rồi tạo lại): <code>spark_rest_conn</code>, <code>minio_conn</code>, <code>postgres_conn</code>, <code>trino_conn</code>, <code>datahub_conn</code>.</li>
+        <li>Image <code>custom-airflow:2.9.2</code> (từ <code>apache/airflow:2.9.2-python3.11</code>) cài <code>dbt-core</code>/<code>dbt-spark</code> 1.8.0, các provider http/amazon/postgres/trino, <code>acryl-datahub[airflow]</code> 0.12.1.5, <code>pandas 2.1.4</code>, <code>pyarrow 14.0.2</code>, dùng <strong>constraints chính thức của Airflow 2.9.2</strong>.</li>
+      </ul>
+    </section>
+
+    <!-- 9 -->
+    <section id="s9">
+      <h2><span class="num">09</span>Metadata &amp; lineage: DataHub</h2>
+      <p>DataHub <strong>v0.12.1</strong> (khớp <code>acryl-datahub[airflow]==0.12.1.5</code>), chuyển từ bản quickstart MySQL sang dùng hạ tầng của repo:</p>
+      <ul>
+        <li><strong>Postgres</strong> (database <code>datahub</code>), <strong>Kafka</strong> <code>kafka:29092</code>, <strong>Elasticsearch</strong> làm graph store (không có Neo4j). <code>schema-registry</code> được thêm vào vì DataHub bắt buộc phải có.</li>
+        <li><code>datahub-gms</code> chạy các consumer MAE/MCE/PE ngay bên trong. UI ở cổng 9002.</li>
+        <li>Spark gửi lineage qua JAR <code>acryl-spark-lineage</code>, Airflow gửi qua <code>datahub_conn</code>. <em>Chưa kiểm chứng lineage thực tế trên UI.</em></li>
+      </ul>
+    </section>
+
+    <!-- 10 -->
+    <section id="s10">
+      <h2><span class="num">10</span>Cấu hình, secret và lưu trữ</h2>
+      <p><strong>Mọi secret và tham số nằm trong <code>.env</code></strong> (đã gitignore, không push lên git), được inject vào container qua <code>environment:</code>. Các nhóm biến:</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Nhóm</th><th>Biến</th></tr></thead>
+        <tbody>
+          <tr><td>Postgres</td><td class="wrap-code"><code>POSTGRES_USER</code>, <code>POSTGRES_PASSWORD</code>, <code>POSTGRES_DB</code>, <code>POSTGRES_HOST</code>, <code>POSTGRES_DB_AIRFLOW</code>, <code>POSTGRES_DB_POLARIS</code>, <code>POSTGRES_DB_DATAHUB</code></td></tr>
+          <tr><td>MinIO</td><td class="wrap-code"><code>MINIO_ROOT_USER</code>, <code>MINIO_ROOT_PASSWORD</code>, <code>MINIO_ENDPOINT</code>, <code>MINIO_BUCKET</code></td></tr>
+          <tr><td>Polaris</td><td class="wrap-code"><code>POLARIS_SECRET</code>, <code>POLARIS_ADMIN_USERNAME</code>, <code>POLARIS_ADMIN_PASSWORD</code></td></tr>
+          <tr><td>Airflow</td><td class="wrap-code"><code>AIRFLOW_ADMIN_USER</code>, <code>AIRFLOW_ADMIN_USERNAME</code>, <code>AIRFLOW_ADMIN_PASSWORD</code>, <code>AIRFLOW_FERNET_KEY</code></td></tr>
+          <tr><td>DataHub</td><td class="wrap-code"><code>DATAHUB_ADMIN_USERNAME</code>, <code>DATAHUB_ADMIN_PASSWORD</code>, <code>DATAHUB_SECRET_KEY</code></td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3 style="margin-top:0">Named volumes</h3>
+          <p style="margin-bottom:8px">Có tiền tố <code>lakehouse-project_</code>. <code>docker compose down</code> giữ lại volume; muốn xoá sạch thì thêm <code>-v</code>.</p>
+          <p style="margin:0;font-size:14px"><code>postgres_data_vol</code> <code>minio_data_vol</code> <code>spark_events_vol</code> <code>airflow_logs_vol</code> <code>kafka_data_vol</code> <code>kafka_secret_vol</code> <code>zookeeper_data_vol</code> <code>zookeeper_log_vol</code> <code>zookeeper_secret_vol</code> <code>elasticsearch_data_vol</code></p>
+        </div>
+        <div class="card">
+          <h3 style="margin-top:0">Bố cục MinIO</h3>
+<pre style="margin:0"><code>s3://lakehouse/
+├── bronze/
+│   ├── _landing/stock_ohlcv/
+│   │   └── ingest_date=YYYY-MM-DD/data.parquet
+│   └── stock_ohlcv/   (data/ + metadata/)
+├── silver/stock_ohlcv/
+└── gold/stock_daily_metrics/</code></pre>
+        </div>
+      </div>
+      <p>Quy ước: mọi service dùng múi giờ <code>Asia/Ho_Chi_Minh</code>. Mỗi <code>compose/*.yml</code> tự khai báo lại mạng <code>lakehouse</code> và <code>volumes:</code> riêng để có thể merge độc lập. Script shell và comment trong <code>.env</code> viết bằng tiếng Việt.</p>
+    </section>
+
+    <!-- 11 -->
+    <section id="s11">
+      <h2><span class="num">11</span>Trạng thái &amp; hạn chế đã biết</h2>
+      <h3>Đã kiểm thử (2026-10-27)</h3>
+      <ul>
+        <li>27/27 service ổn: 17 đang chạy (16 healthy; <code>datahub-actions</code> không có healthcheck) và 10 job setup thoát mã 0. Chạy <code>up -d</code> lại vẫn thoát mã 0.</li>
+        <li>Cả 10 cổng host đều trả lời.</li>
+        <li>Spark ghi và đọc được bảng Iceberg qua Polaris xuống MinIO.</li>
+        <li><strong>Trino đọc được bảng do Spark ghi</strong>; Trino tạo bảng (CTAS) và <code>DROP TABLE</code> được.</li>
+        <li>Restart Polaris không mất catalog hay namespace.</li>
+        <li>Airflow nạp được DAG, không có import error, đủ 5 connection, gọi tới được Spark REST, Polaris, MinIO, Trino và DataHub.</li>
+        <li>pytest: <span class="ok-text">4/4</span> trên host, <span class="ok-text">7/7</span> test Spark trong container.</li>
+      </ul>
+      <h3>Hạn chế</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Vấn đề</th><th>Ảnh hưởng</th><th>Ghi chú</th></tr></thead>
+        <tbody>
+          <tr><td><code>vnstock</code> (và <code>vnai</code>) bị <strong>PyPI quarantine</strong> từ 2026-09-24</td><td>Task <code>ingest_landing</code> sẽ lỗi; pipeline chưa chạy end-to-end</td><td><code>vnstock</code> đã comment khỏi <code>airflow/requirements.txt</code>. Hướng xử lý: dữ liệu giả để test, hoặc gọi thẳng endpoint VCI/KBS</td></tr>
+          <tr><td>dbt chưa có model; <code>dbt_project.yml</code> rỗng</td><td>Chưa dùng được dbt</td><td><code>spark-thrift</code> cũng chưa có cấu hình catalog Polaris</td></tr>
+          <tr><td><code>container_name</code> cố định</td><td>Mỗi Docker host chỉ chạy được một bản của stack</td><td></td></tr>
+          <tr><td>Python khác nhau giữa các nơi</td><td>Code job phải chạy được trên Python 3.8</td><td>Spark 3.8, Airflow 3.11, venv host 3.11</td></tr>
+          <tr><td><code>pyarrow</code> lệch</td><td>Airflow 14.0.2 (bắt buộc theo constraints) và <code>pyproject.toml</code> 15.0.2</td><td></td></tr>
+          <tr><td>Kafka/ES không có cổng trên host</td><td>Không kết nối từ host được</td><td>Cần thêm <code>ports:</code> nếu muốn dùng</td></tr>
+          <tr><td>Lineage DataHub</td><td>Chưa kiểm chứng trên UI</td><td></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 12 -->
+    <section id="s12">
+      <h2><span class="num">12</span>Vận hành</h2>
+      <p>Chạy <strong>trong WSL</strong>, tại thư mục gốc repo:</p>
+<pre><code>docker compose config --quiet          # kiểm tra 7 module merge hợp lệ
+docker compose build                   # build custom-spark, custom-airflow
+docker compose up -d                   # bật toàn bộ stack
+docker compose ps -a                   # trạng thái + health
+docker compose logs -f &lt;service&gt;
+docker compose down                    # dừng (giữ volume)</code></pre>
+      <h3>Kiểm tra nhanh</h3>
+<pre><code>docker exec trino trino --execute "SHOW SCHEMAS FROM lakehouse"   # bronze gold information_schema silver
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8181/api/catalog/v1/config  # 401 = Polaris đang chạy</code></pre>
+      <h3>Chạy job Spark bằng tay</h3>
+      <p><code>spark-submit</code> <strong>không nằm trong PATH</strong> của container, phải dùng đường dẫn đầy đủ:</p>
+<pre><code>docker compose exec spark-master /opt/spark/bin/spark-submit \
+  --py-files /opt/spark/jobs/common.py /opt/spark/jobs/job_bronze.py   # tương tự silver, gold</code></pre>
+      <h3>Test</h3>
+<pre><code>venv/bin/python -m pytest -m "not spark"        # host (WSL), không cần Java
+# test Spark: chạy trong spark-master (xem CLAUDE.md, mục Common commands)</code></pre>
+      <h3>Giao diện web</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>UI</th><th>Địa chỉ</th></tr></thead>
+        <tbody>
+          <tr><td>MinIO console</td><td><code>http://localhost:9001</code></td></tr>
+          <tr><td>Spark master</td><td><code>http://localhost:8090</code></td></tr>
+          <tr><td>Spark history</td><td><code>http://localhost:18080</code></td></tr>
+          <tr><td>Trino</td><td><code>http://localhost:8080</code></td></tr>
+          <tr><td>Airflow</td><td><code>http://localhost:8085</code></td></tr>
+          <tr><td>DataHub</td><td><code>http://localhost:9002</code></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 13 -->
+    <section id="s13">
+      <h2><span class="num">13</span>Phụ lục: những bẫy đã gặp khi dựng</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Bẫy</th><th>Cách nhận biết</th><th>Đã xử lý</th></tr></thead>
+        <tbody>
+          <tr><td>Polaris mặc định dùng metastore <strong>in-memory</strong></td><td>Log có "intended for tests only"; database <code>polaris</code> không có bảng</td><td>Bật <code>relational-jdbc</code> và thêm <code>polaris-bootstrap</code></td></tr>
+          <tr><td><code>admin-tool bootstrap</code> chạy lần 2 thoát mã 3 (tài liệu nói idempotent)</td><td>"already been bootstrapped"</td><td>Bọc bằng <code>sh</code>, coi lỗi này là thành công</td></tr>
+          <tr><td>Cấp lại grant đã có thì trả HTTP 500</td><td><code>duplicate key … grant_records_pkey</code></td><td><code>init.sh</code> đọc danh sách grant trước rồi mới cấp</td></tr>
+          <tr><td>Namespace tạo qua Management API thì nhận 404</td><td><code>curl -s</code> vẫn thoát mã 0 nên script in "created"</td><td>Dùng Iceberg REST API và kiểm tra <code>%{http_code}</code></td></tr>
+          <tr><td>Trino 435 không đặt được OAuth2 scope</td><td><code>invalid_scope</code></td><td>Nâng lên Trino 454, thêm <code>oauth2.scope</code></td></tr>
+          <tr><td>Trino không có credential S3</td><td><code>Unable to load AWS credentials</code></td><td>Thêm cấu hình <code>fs.native-s3.*</code></td></tr>
+          <tr><td><code>pyarrow 15.0.2</code> mâu thuẫn với constraints Airflow</td><td>pip <code>ResolutionImpossible</code></td><td>Hạ xuống 14.0.2</td></tr>
+          <tr><td>Shell WSL mở từ trước khi bật Docker integration</td><td><code>permission denied … docker.sock</code></td><td>Mở shell mới hoặc chạy <code>newgrp docker</code></td></tr>
+          <tr><td>CDN Docker Hub đứt kết nối</td><td><code>httpReadSeeker … EOF</code></td><td>Chạy lại lệnh</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <footer>Nguồn: <code>docs/system-overview.md</code>. Nội dung đối chiếu với code và kết quả kiểm thử ngày 2026-10-27.</footer>
+  </main>
+</div>
+
+<script>
+  // Đổi theme sáng/tối; nhớ lựa chọn nếu trình duyệt cho phép lưu trữ.
+  (function () {
+    var root = document.documentElement;
+    try {
+      var saved = localStorage.getItem("theme");
+      if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+    } catch (e) {}
+    document.getElementById("themeBtn").addEventListener("click", function () {
+      var current = root.getAttribute("data-theme") ||
+        (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      var next = current === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("theme", next); } catch (e) {}
+    });
+  })();
+
+  // Mục lục: đóng mặc định trên màn hình hẹp; đánh dấu mục đang xem.
+  (function () {
+    var details = document.getElementById("tocDetails");
+    if (window.matchMedia("(max-width: 999px)").matches) details.removeAttribute("open");
+    var links = Array.prototype.slice.call(document.querySelectorAll("nav.toc a"));
+    if (!("IntersectionObserver" in window)) return;
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute("href").slice(1)] = a; });
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) {
+          links.forEach(function (a) { a.classList.remove("active"); });
+          var a = byId[en.target.id];
+          if (a) a.classList.add("active");
+        }
+      });
+    }, { rootMargin: "-20% 0px -70% 0px" });
+    document.querySelectorAll("main section").forEach(function (s) { obs.observe(s); });
+  })();
+</script>
+</body>
+</html>
