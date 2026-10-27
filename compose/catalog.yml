@@ -1,0 +1,49 @@
+services:
+  polaris:
+    image: apache/polaris:latest
+    container_name: polaris
+    depends_on:
+      # chờ postgres-setup hoàn thành vì cần database 'polaris' đã tồn tại
+      postgres-setup:
+        condition: service_completed_successfully
+    environment:
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,${POLARIS_SECRET}
+      quarkus.datasource.jdbc.url: jdbc:postgresql://postgres:5432/${POSTGRES_DB_POLARIS}
+      quarkus.datasource.username: ${POLARIS_ADMIN_USERNAME}
+      quarkus.datasource.password: ${POLARIS_ADMIN_PASSWORD}
+      quarkus.datasource.db-kind: postgresql
+    ports: ["8181:8181"]
+    networks: [lakehouse]
+    healthcheck:
+      # Polaris 1.5.0 (Quarkus 3.x): /q/health nằm trên management port 8182, không phải main port 8181
+      test: ["CMD-SHELL", "curl -sf http://localhost:8182/q/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  polaris-setup:
+    image: alpine:3.19
+    container_name: polaris-setup
+    depends_on:
+      polaris:
+        condition: service_healthy
+      # chờ minio-setup tạo bucket trước khi đăng ký location với Polaris
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      POLARIS_HOST: polaris
+      POLARIS_PORT: 8181
+      POLARIS_CLIENT_ID: root
+      POLARIS_CLIENT_SECRET: ${POLARIS_SECRET}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ../polaris/scripts:/scripts
+    command: ["sh", "-c", "apk add --no-cache curl && sh /scripts/init.sh"]
+    networks: [lakehouse]
+
+networks:
+  lakehouse:
+    driver: bridge

@@ -1,0 +1,23 @@
+services:
+  trino:
+    image: trinodb/trino:435
+    container_name: trino
+    environment:
+      POLARIS_SECRET: ${POLARIS_SECRET}
+    ports: ["8080:8080"]
+    volumes:
+      - ../trino/catalog:/etc/trino/catalog
+    depends_on:
+      polaris:
+        condition: service_healthy
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 30s
+
+networks:
+  lakehouse:
+    driver: bridge

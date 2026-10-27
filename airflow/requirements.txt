@@ -1,0 +1,20 @@
+# dbt-spark dùng PyHive kết nối Spark Thrift Server qua Python thuần, không cần Java
+dbt-core==1.8.0
+dbt-spark[PyHive]==1.8.0
+
+# airflow providers
+apache-airflow-providers-http==4.11.1          # gọi Spark REST API (cluster mode)
+apache-airflow-providers-amazon==8.24.0        # MinIO / S3
+apache-airflow-providers-postgres==5.11.1      # PostgreSQL
+apache-airflow-providers-trino==5.7.1          # Trino ad-hoc queries
+
+# datahub ingestion recipes
+acryl-datahub[airflow]==0.12.1.5
+
+# ingest OHLCV (task ingest trong DAG lakehouse_ohlcv) — vnstock 4.x giữ API
+# vnstock.api.quote.Quote().history (đã verify 2026-10-27); pin để tránh nhảy lên
+# gen5 (v5) đổi cách gọi. pandas/pyarrow để ghi parquet lên MinIO qua boto3 (đã có
+# sẵn từ provider amazon).
+vnstock==4.0.4
+pandas==2.1.4
+pyarrow==15.0.2

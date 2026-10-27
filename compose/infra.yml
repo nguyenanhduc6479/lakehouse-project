@@ -1,0 +1,138 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data_vol:/var/lib/postgresql/data
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 5s
+
+  postgres-setup:
+    image: postgres:15
+    container_name: postgres-setup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../postgres/scripts:/scripts
+    tmpfs:
+      - /var/lib/postgresql/data
+    environment:
+      PGHOST: ${POSTGRES_HOST}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      POSTGRES_DB_AIRFLOW: ${POSTGRES_DB_AIRFLOW}
+      AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      POSTGRES_DB_POLARIS: ${POSTGRES_DB_POLARIS}
+      POLARIS_ADMIN_USERNAME: ${POLARIS_ADMIN_USERNAME}
+      POLARIS_ADMIN_PASSWORD: ${POLARIS_ADMIN_PASSWORD}
+      POSTGRES_DB_DATAHUB: ${POSTGRES_DB_DATAHUB}
+      DATAHUB_ADMIN_USERNAME: ${DATAHUB_ADMIN_USERNAME}
+      DATAHUB_ADMIN_PASSWORD: ${DATAHUB_ADMIN_PASSWORD}
+    command: ["bash", "/scripts/init.sh"]
+    networks: [lakehouse]
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data_vol:/var/lib/zookeeper/data
+      - zookeeper_log_vol:/var/lib/zookeeper/log
+      - zookeeper_secret_vol:/etc/zookeeper/secrets
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data_vol:/var/lib/kafka/data
+      - kafka_secret_vol:/etc/kafka/secrets
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 30s
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka-setup
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - kafka_data_vol:/var/lib/kafka/data
+      - kafka_secret_vol:/etc/kafka/secrets
+    command: >
+      bash -c "
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataChangeProposal_v1 --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataChangeLog_Versioned_v1 --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataChangeLog_Timeseries_v1 --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataAuditEvent_v4 --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic PlatformEvent_v1 --partitions 1 --replication-factor 1 &&
+        echo 'Kafka topics created.'
+      "
+    networks: [lakehouse]
+
+  elasticsearch:
+    image: elasticsearch:7.17.10
+    container_name: elasticsearch
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"
+    volumes:
+      - elasticsearch_data_vol:/usr/share/elasticsearch/data
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  postgres_data_vol:
+  zookeeper_data_vol:
+  zookeeper_log_vol:
+  zookeeper_secret_vol:
+  kafka_data_vol:
+  kafka_secret_vol:
+  elasticsearch_data_vol:
+
+networks:
+  lakehouse:
+    driver: bridge

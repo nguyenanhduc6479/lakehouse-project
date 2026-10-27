@@ -1,0 +1,148 @@
+services:
+  # chạy một lần trước khi spark-thrift start để fix ownership của spark_events_vol
+  # (named volume mới tạo có owner root, spark user UID 185 cần write access)
+  spark-fix-permissions:
+    image: busybox
+    container_name: spark-fix-permissions
+    command: ["sh", "-c", "chown -R 185:185 /opt/spark/eventlogs"]
+    volumes:
+      - spark_events_vol:/opt/spark/eventlogs
+    networks: [lakehouse]
+
+  spark-master:
+    build:
+      context: ../spark
+      dockerfile: Dockerfile
+    image: custom-spark:3.5.1
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_OPTS: "-Dspark.master.rest.enabled=true -Dspark.master.rest.port=6066"
+      # config cho job đọc trong common.py (Polaris REST catalog + MinIO) — lấy từ .env
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      POLARIS_SECRET: ${POLARIS_SECRET}
+      POLARIS_URI: http://polaris:8181/api/catalog
+    ports:
+      - "7077:7077"      # master RPC
+      - "8090:8080"      # master web UI (8090 host, tránh đụng Trino 8080)
+      - "6066:6066"      # REST API cho cluster mode submit
+    volumes:
+      - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - ../spark/jobs:/opt/spark/jobs
+      - spark_events_vol:/opt/spark/eventlogs
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  spark-worker:
+    image: custom-spark:3.5.1
+    container_name: spark-worker
+    # driver chạy trên worker (cluster mode) nên cần env Polaris/MinIO cho common.py
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      POLARIS_SECRET: ${POLARIS_SECRET}
+      POLARIS_URI: http://polaris:8181/api/catalog
+    command:
+      - "/opt/spark/bin/spark-class"
+      - "org.apache.spark.deploy.worker.Worker"
+      - "spark://spark-master:7077"
+      - "--cores"
+      - "2"
+      - "--memory"
+      - "2G"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    ports:
+      - "8081:8081"      # worker web UI
+    volumes:
+      - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - ../spark/jobs:/opt/spark/jobs
+      - spark_events_vol:/opt/spark/eventlogs
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  spark-thrift:
+    image: custom-spark:3.5.1
+    container_name: spark-thrift
+    command:
+      - "/opt/spark/sbin/start-thriftserver.sh"
+      - "--master"
+      - "spark://spark-master:7077"
+      - "--hiveconf"
+      - "hive.server2.thrift.port=10000"
+      - "--hiveconf"
+      - "hive.server2.thrift.bind.host=0.0.0.0"
+    environment:
+      SPARK_NO_DAEMONIZE: "true"    # chạy foreground để container không exit
+      # để sẵn cho giai đoạn dbt sau (thrift còn cần catalog config trong
+      # spark-defaults.conf mới dùng được Iceberg — chưa làm ở pipeline này)
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      POLARIS_SECRET: ${POLARIS_SECRET}
+      POLARIS_URI: http://polaris:8181/api/catalog
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-fix-permissions:
+        condition: service_completed_successfully
+    ports:
+      - "10000:10000"    # JDBC cho dbt-spark
+      - "4040:4040"      # Spark UI của thrift app
+    volumes:
+      - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - spark_events_vol:/opt/spark/eventlogs
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4040 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  spark-history:
+    image: custom-spark:3.5.1
+    container_name: spark-history
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"]
+    environment:
+      SPARK_HISTORY_OPTS: "-Dspark.history.fs.logDirectory=file:///opt/spark/eventlogs -Dspark.history.ui.port=18080"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    ports:
+      - "18080:18080"    # history server web UI
+    volumes:
+      - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - spark_events_vol:/opt/spark/eventlogs
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:18080 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  spark_events_vol:
+
+networks:
+  lakehouse:
+    driver: bridge
