@@ -35,3 +35,5 @@ Thumbs.db
 
 # Local logs
 *.log
+
+_00_commons/

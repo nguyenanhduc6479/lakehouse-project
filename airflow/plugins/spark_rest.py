@@ -27,7 +27,7 @@ SPARK_VERSION = "3.5.1"
 def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: int = 1800) -> None:
     """Submit `job_file` (e.g. 'job_bronze.py') and block until FINISHED; raise if FAILED.
 
-    common.py is shipped along via spark.submit.pyFiles so the job can import it.
+    helper.py is shipped along via spark.submit.pyFiles so the job can import it.
     """
     app_resource = f"file:{JOBS_DIR}/{job_file}"
     payload = {
@@ -41,7 +41,7 @@ def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: i
             "spark.master": SPARK_MASTER,
             "spark.submit.deployMode": "cluster",
             "spark.app.name": job_file,
-            "spark.submit.pyFiles": f"{JOBS_DIR}/common.py",
+            "spark.submit.pyFiles": f"{JOBS_DIR}/helper.py",
             "spark.driver.supervise": "false",
         },
     }

@@ -41,8 +41,11 @@ def minio_bucket() -> str:
     return _env("MINIO_BUCKET", "lakehouse")
 
 
-def get_spark(app_name: str) -> SparkSession:
+def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> SparkSession:
     """Build a SparkSession wired to Polaris (Iceberg REST + OAuth2) and MinIO (S3).
+
+    `extra_conf`: job-specific Spark configs (e.g. {"spark.sql.shuffle.partitions": "8"}).
+    Applied after the defaults below, so a job can also override one of them.
 
     WHY each config:
     - catalog type=rest + uri=.../api/catalog: Polaris is an Iceberg REST catalog, NOT
@@ -90,6 +93,8 @@ def get_spark(app_name: str) -> SparkSession:
             "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
         )
     )
+    for key, value in (extra_conf or {}).items():
+        builder = builder.config(key, value)
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark

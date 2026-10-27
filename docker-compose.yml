@@ -6,6 +6,7 @@ include:
   - compose/spark.yml
   - compose/trino.yml
   - compose/airflow.yml
+  - compose/monitoring.yml
 
 networks:
   lakehouse:

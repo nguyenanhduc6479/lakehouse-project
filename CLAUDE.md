@@ -38,7 +38,7 @@ tunables live in `.env` and are injected via `environment:` — change config th
 hardcoding values in compose files.
 
 Included modules (active set in `docker-compose.yml`): `infra.yml`, `storage.yml`, `catalog.yml`,
-`spark.yml`, `trino.yml`, `airflow.yml`, `datahub.yml`.
+`spark.yml`, `trino.yml`, `airflow.yml`, `datahub.yml`, `monitoring.yml`.
 
 Layers:
 
@@ -65,8 +65,9 @@ Layers:
   (`custom-spark:3.5.1`) bundling the Hadoop-AWS, Iceberg (`iceberg-spark-runtime` +
   `iceberg-aws-bundle`, which carry the REST catalog client — no Nessie), Postgres, Kafka, and
   acryl DataHub-lineage JARs. Services: `spark-master` (RPC 7077, UI 8090→8080, REST 6066),
-  `spark-worker` (UI 8081), `spark-thrift` (Hive Thrift JDBC on 10000 for dbt, app UI 4040),
-  `spark-history` (18080). Worker size comes from `SPARK_WORKER_CORES`/`SPARK_WORKER_MEMORY` in
+  `spark-worker` (UI 8081), `spark-thrift` (Hive Thrift JDBC on 10000 for dbt, app UI 4040).
+  (`spark-history` was removed in favour of Grafana; event logs still go to `spark_events_vol`.)
+  Worker size comes from `SPARK_WORKER_CORES`/`SPARK_WORKER_MEMORY` in
   `.env` (4 cores / 3G). `spark-thrift` is a long-running app capped at `spark.cores.max=1` +
   512m executor — without the cap Standalone gives it every worker core and REST-submitted
   pipeline jobs wait forever. Job code lives in `./spark/jobs`, mounted at `/opt/spark/jobs` with
@@ -102,6 +103,16 @@ Layers:
   DataHub requires one and `infra.yml` doesn't ship it. Spark/Airflow emit lineage to GMS via the
   acryl JAR / `datahub_conn`. **Env vars are taken verbatim from the `v0.12.1` tag** — don't
   hand-edit them from memory; re-derive from the upstream quickstart if bumping the version.
+- **Logs** (`compose/monitoring.yml`, config under `./monitoring`): **Grafana 13.2.3** (UI on
+  **3000**, admin `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` from `.env`) reading **Loki 3.7.8**
+  (internal `loki:3100`, filesystem storage in `loki_data_vol`, 7-day retention), fed by **Grafana
+  Alloy v1.20.1** (not Promtail — EOL), which discovers this project's containers through the
+  mounted Docker socket and tails their stdout/stderr with labels `container`, `service`,
+  `stream`. Datasource (`uid: loki`) and the "Container logs" dashboard are provisioned from
+  `monitoring/grafana/`. Loki's image is distroless (no healthcheck possible), so `alloy`'s
+  healthcheck probes both itself and Loki via bash `/dev/tcp` (needs `CMD bash -c`, not
+  `CMD-SHELL`, which runs dash). Alloy only sees running containers: one-shot jobs that exited
+  before it started are not collected.
 
 Medallion convention is consistent end-to-end: `bronze` / `silver` / `gold` exist both as MinIO
 prefixes under `s3://lakehouse/` and as Polaris namespaces.
@@ -109,8 +120,8 @@ prefixes under `s3://lakehouse/` and as Polaris namespaces.
 ## Current state
 
 - **Infrastructure wiring is complete.** The modular split under `compose/` is done and is the
-  source of truth (no monolithic `docker-compose_bk.yml`). All seven modules — `infra`, `storage`,
-  `catalog`, `spark`, `trino`, `airflow`, `datahub` — are active in `docker-compose.yml` and
+  source of truth (no monolithic `docker-compose_bk.yml`). All eight modules — `infra`, `storage`,
+  `catalog`, `spark`, `trino`, `airflow`, `datahub`, `monitoring` — are active in `docker-compose.yml` and
   `docker compose config` merges cleanly (cross-file `depends_on` all resolve).
 - **Runtime-validated 2026-10-27 (WSL2 Ubuntu + Docker Desktop).** `docker compose build` and
   `up -d` succeed (also on re-runs); all 27 services come up: 17 running (16 healthy —
@@ -260,9 +271,9 @@ Quick catalog check from Trino (proves OAuth2 scope + Polaris persistence + name
 
 MinIO 9000 / console 9001 · Polaris 8181 (health 8182 is container-only, not published; an
 unauthenticated `GET :8181/api/catalog/v1/config` → 401 means it's up) · Spark master UI 8090, RPC 7077, REST 6066
-· Spark worker 8081 · Spark Thrift 10000, UI 4040 · Spark history 18080 · Trino 8080 · Airflow UI
+· Spark worker 8081 · Spark Thrift 10000, UI 4040 · Grafana 3000 · Trino 8080 · Airflow UI
 8085 · DataHub UI 9002, GMS API 8083 · Postgres 5432. **Not published** (container network only,
-verified with `docker ps`): Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200, schema-registry
+verified with `docker ps`): Loki 3100, Alloy 12345, Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200, schema-registry
 8081 — Kafka's `PLAINTEXT_HOST://localhost:9092` listener is unreachable from the host until a
 `ports:` entry is added.
 

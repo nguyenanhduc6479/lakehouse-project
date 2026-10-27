@@ -1,0 +1,91 @@
+# Container log monitoring: Alloy tails every container of this compose project through the
+# Docker API and pushes to Loki; Grafana reads Loki (datasource + dashboard are provisioned).
+# Alloy rather than Promtail: Promtail is end-of-life and Grafana points to Alloy as its successor.
+services:
+  loki:
+    image: grafana/loki:3.7.8
+    container_name: loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ../monitoring/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki_data_vol:/loki
+    networks: [lakehouse]
+    # No healthcheck: the image is distroless (no shell/curl/wget). Readiness is checked from
+    # alloy's healthcheck instead, and both Alloy and Grafana retry Loki on their own.
+
+  alloy:
+    image: grafana/alloy:v1.20.1
+    container_name: alloy
+    command:
+      - "run"
+      - "/etc/alloy/config.alloy"
+      - "--storage.path=/var/lib/alloy/data"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ../monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Docker API access to discover containers and read their logs. Note: the socket grants
+      # full control of the Docker daemon (":ro" does not restrict the API) — local use only.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data_vol:/var/lib/alloy/data
+    depends_on:
+      loki:
+        condition: service_started
+    networks: [lakehouse]
+    healthcheck:
+      # The image has bash but no curl/wget: probe Alloy's own /-/ready and Loki's /ready
+      # over /dev/tcp (bash-only — CMD-SHELL would run dash, which lacks it).
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - >-
+          for hp in 127.0.0.1:12345:/-/ready loki:3100:/ready; do
+          h=$${hp%%:*}; r=$${hp#*:}; p=$${r%%:*}; u=$${r#*:};
+          exec 3<>/dev/tcp/$$h/$$p || exit 1;
+          printf 'GET %s HTTP/1.0\r\nHost: %s\r\n\r\n' $$u $$h >&3;
+          head -1 <&3 | grep -q ' 200 ' || exit 1;
+          exec 3<&-; done
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    container_name: grafana
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "3000:3000"      # Grafana UI
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data_vol:/var/lib/grafana
+    depends_on:
+      alloy:
+        condition: service_healthy
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  loki_data_vol:
+  alloy_data_vol:
+  grafana_data_vol:
+
+networks:
+  lakehouse:
+    driver: bridge

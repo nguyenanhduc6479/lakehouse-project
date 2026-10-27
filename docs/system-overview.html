@@ -399,7 +399,7 @@
             <g class="node comp">
               <rect x="330" y="200" width="220" height="64" rx="10"/>
               <text x="440" y="226" text-anchor="middle">Spark 3.5.1</text>
-              <text class="sub" x="440" y="245" text-anchor="middle">master · worker · thrift · history</text>
+              <text class="sub" x="440" y="245" text-anchor="middle">master · worker · thrift</text>
             </g>
             <g class="node cat">
               <rect x="640" y="200" width="210" height="64" rx="10"/>
@@ -434,7 +434,7 @@
         <figcaption>Every service is on one Docker network, <code>lakehouse</code>. Dashed line: Polaris reads/writes metadata files on MinIO itself. Airflow also uses Postgres as its metadata DB (not drawn, to keep the diagram clean).</figcaption>
       </figure>
 
-      <p><code>docker-compose.yml</code> only <code>include</code>s the 7 modules in <code>compose/</code> and declares the shared network:</p>
+      <p><code>docker-compose.yml</code> only <code>include</code>s the 8 modules in <code>compose/</code> and declares the shared network:</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Module</th><th>Main services</th></tr></thead>
         <tbody>
@@ -442,24 +442,25 @@
           <tr><td><code>storage.yml</code></td><td>MinIO</td></tr>
           <tr><td><code>catalog.yml</code></td><td>Polaris (+ bootstrap, setup)</td></tr>
           <tr><td><code>datahub.yml</code></td><td>DataHub GMS, frontend, actions, schema-registry</td></tr>
-          <tr><td><code>spark.yml</code></td><td>Spark master, worker, thrift, history</td></tr>
+          <tr><td><code>spark.yml</code></td><td>Spark master, worker, thrift</td></tr>
           <tr><td><code>trino.yml</code></td><td>Trino</td></tr>
           <tr><td><code>airflow.yml</code></td><td>Airflow init, webserver, scheduler</td></tr>
+          <tr><td><code>monitoring.yml</code></td><td>Grafana, Loki, Alloy (container logs)</td></tr>
         </tbody>
       </table></div>
     </section>
 
     <!-- 3 -->
     <section id="s3">
-      <h2><span class="num">03</span>Services (27 containers)</h2>
+      <h2><span class="num">03</span>Services (29 containers)</h2>
       <div class="stats">
-        <div class="card"><div class="stat">27</div><div class="stat-label">containers</div></div>
-        <div class="card"><div class="stat">17</div><div class="stat-label">long-running</div></div>
+        <div class="card"><div class="stat">29</div><div class="stat-label">containers</div></div>
+        <div class="card"><div class="stat">19</div><div class="stat-label">long-running</div></div>
         <div class="card"><div class="stat">16</div><div class="stat-label">healthy</div></div>
         <div class="card"><div class="stat">10</div><div class="stat-label">one-shot jobs, exit 0</div></div>
       </div>
 
-      <h3>Long-running services (17)</h3>
+      <h3>Long-running services (19)</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Service</th><th>Image</th><th>Role</th><th>Host port</th></tr></thead>
         <tbody>
@@ -469,7 +470,6 @@
           <tr><td><code>spark-master</code></td><td><code>custom-spark:3.5.1</code></td><td>Spark master + REST submit</td><td>8090 (UI), 7077 (RPC), 6066 (REST)</td></tr>
           <tr><td><code>spark-worker</code></td><td><code>custom-spark:3.5.1</code></td><td>Executor/driver (<code>SPARK_WORKER_CORES</code>/<code>_MEMORY</code>, 4 cores / 3 GB)</td><td>8081</td></tr>
           <tr><td><code>spark-thrift</code></td><td><code>custom-spark:3.5.1</code></td><td>Hive Thrift JDBC for dbt</td><td>10000, 4040 (UI)</td></tr>
-          <tr><td><code>spark-history</code></td><td><code>custom-spark:3.5.1</code></td><td>Spark History Server</td><td>18080</td></tr>
           <tr><td><code>trino</code></td><td><code>trinodb/trino:454</code></td><td>SQL query engine</td><td>8080</td></tr>
           <tr><td><code>airflow-webserver</code></td><td><code>custom-airflow:2.9.2</code></td><td>Airflow UI</td><td>8085</td></tr>
           <tr><td><code>airflow-scheduler</code></td><td><code>custom-airflow:2.9.2</code></td><td>Scheduling + task execution (LocalExecutor)</td><td>—</td></tr>
@@ -480,6 +480,9 @@
           <tr><td><code>datahub-gms</code></td><td><code>datahub-gms:v0.12.1</code></td><td>Metadata API</td><td>8083</td></tr>
           <tr><td><code>datahub-frontend-react</code></td><td><code>datahub-frontend-react:v0.12.1</code></td><td>DataHub UI</td><td>9002</td></tr>
           <tr><td><code>datahub-actions</code></td><td><code>datahub-actions:v0.0.14</code></td><td>Actions framework</td><td>—</td></tr>
+          <tr><td><code>loki</code></td><td><code>grafana/loki:3.7.8</code></td><td>Log store (7-day retention)</td><td>—</td></tr>
+          <tr><td><code>alloy</code></td><td><code>grafana/alloy:v1.20.1</code></td><td>Tails container logs via the Docker socket → Loki</td><td>—</td></tr>
+          <tr><td><code>grafana</code></td><td><code>grafana/grafana:13.2.3</code></td><td>Log UI (Loki datasource + "Container logs" dashboard)</td><td>3000</td></tr>
         </tbody>
       </table></div>
       <p class="note info">"—" = reachable only inside the Docker network (verified with <code>docker ps</code>). Kafka advertises a <code>localhost:9092</code> listener but <strong>does not publish the port</strong>, so it can't be reached from the host.</p>
@@ -511,11 +514,12 @@
                             │                                 └─▶ trino
                             └─▶ airflow-init ─▶ airflow-webserver, airflow-scheduler
 minio ─▶ minio-setup
-spark-master ─▶ spark-worker, spark-history;  spark-fix-permissions + spark-master ─▶ spark-thrift
+spark-master ─▶ spark-worker;  spark-fix-permissions + spark-master ─▶ spark-thrift
 zookeeper ─▶ kafka ─┬─▶ kafka-setup ─────────────────┐
                     └─▶ schema-registry ─────────────┤
 elasticsearch ─▶ datahub-elasticsearch-setup ────────┼─▶ datahub-upgrade ─▶ datahub-gms ─┬─▶ datahub-frontend-react
-postgres-setup ─▶ datahub-postgres-setup ────────────┘                                  └─▶ datahub-actions</code></pre>
+postgres-setup ─▶ datahub-postgres-setup ────────────┘                                  └─▶ datahub-actions
+loki ─▶ alloy (healthy = alloy + loki ready) ─▶ grafana</code></pre>
       <p>The Nth <code>docker compose up -d</code> still succeeds: every setup job is idempotent (verified).</p>
     </section>
 
@@ -610,6 +614,7 @@ postgres-setup ─▶ datahub-postgres-setup ───────────�
           <tr><td>Polaris</td><td class="wrap-code"><code>POLARIS_SECRET</code>, <code>POLARIS_ADMIN_USERNAME</code>, <code>POLARIS_ADMIN_PASSWORD</code></td></tr>
           <tr><td>Airflow</td><td class="wrap-code"><code>AIRFLOW_ADMIN_USER</code>, <code>AIRFLOW_ADMIN_USERNAME</code>, <code>AIRFLOW_ADMIN_PASSWORD</code>, <code>AIRFLOW_FERNET_KEY</code></td></tr>
           <tr><td>DataHub</td><td class="wrap-code"><code>DATAHUB_ADMIN_USERNAME</code>, <code>DATAHUB_ADMIN_PASSWORD</code>, <code>DATAHUB_SECRET_KEY</code></td></tr>
+          <tr><td>Grafana</td><td class="wrap-code"><code>GRAFANA_ADMIN_USER</code>, <code>GRAFANA_ADMIN_PASSWORD</code></td></tr>
         </tbody>
       </table></div>
 
@@ -617,7 +622,7 @@ postgres-setup ─▶ datahub-postgres-setup ───────────�
         <div class="card">
           <h3 style="margin-top:0">Named volumes</h3>
           <p style="margin-bottom:8px">Prefixed <code>lakehouse-project_</code>. <code>docker compose down</code> keeps volumes; add <code>-v</code> to wipe everything.</p>
-          <p style="margin:0;font-size:14px"><code>postgres_data_vol</code> <code>minio_data_vol</code> <code>spark_events_vol</code> <code>airflow_logs_vol</code> <code>kafka_data_vol</code> <code>kafka_secret_vol</code> <code>zookeeper_data_vol</code> <code>zookeeper_log_vol</code> <code>zookeeper_secret_vol</code> <code>elasticsearch_data_vol</code></p>
+          <p style="margin:0;font-size:14px"><code>postgres_data_vol</code> <code>minio_data_vol</code> <code>spark_events_vol</code> <code>airflow_logs_vol</code> <code>kafka_data_vol</code> <code>kafka_secret_vol</code> <code>zookeeper_data_vol</code> <code>zookeeper_log_vol</code> <code>zookeeper_secret_vol</code> <code>elasticsearch_data_vol</code> <code>loki_data_vol</code> <code>alloy_data_vol</code> <code>grafana_data_vol</code></p>
         </div>
         <div class="card">
           <h3 style="margin-top:0">MinIO layout</h3>
@@ -645,6 +650,7 @@ postgres-setup ─▶ datahub-postgres-setup ───────────�
         <li>Restarting Polaris loses neither catalog nor namespaces.</li>
         <li>Airflow loads the DAG with no import errors, has all 5 connections, and reaches Spark REST, Polaris, MinIO, Trino and DataHub.</li>
         <li>pytest: <span class="ok-text">4/4</span> on the host, <span class="ok-text">7/7</span> Spark tests in the container.</li>
+        <li>Later that day <code>spark-history</code> was replaced by Grafana + Loki + Alloy: all three come up (Alloy/Grafana healthy), logs of every running container reach Loki, and Grafana's Loki datasource and "Container logs" dashboard are provisioned.</li>
       </ul>
       <h3>Limitations</h3>
       <div class="table-wrap"><table>
@@ -657,6 +663,7 @@ postgres-setup ─▶ datahub-postgres-setup ───────────�
           <tr><td><code>pyarrow</code> mismatch</td><td>Airflow 14.0.2 (required by constraints) vs <code>pyproject.toml</code> 15.0.2</td><td></td></tr>
           <tr><td>Kafka/ES have no host ports</td><td>Can't connect from the host</td><td>Add <code>ports:</code> if needed</td></tr>
           <tr><td>DataHub lineage</td><td>Not yet verified in the UI</td><td></td></tr>
+          <tr><td>Alloy only tails running containers</td><td>Logs of one-shot jobs that exited before Alloy started aren't in Loki</td><td>Use <code>docker logs &lt;job&gt;</code> for those</td></tr>
         </tbody>
       </table></div>
     </section>
@@ -665,7 +672,7 @@ postgres-setup ─▶ datahub-postgres-setup ───────────�
     <section id="s12">
       <h2><span class="num">12</span>Operations</h2>
       <p>Run <strong>inside WSL</strong>, from the repo root:</p>
-<pre><code>docker compose config --quiet          # check the 7 modules merge cleanly
+<pre><code>docker compose config --quiet          # check the 8 modules merge cleanly
 docker compose build                   # build custom-spark, custom-airflow
 docker compose up -d                   # start the whole stack
 docker compose ps -a                   # status + health
@@ -692,7 +699,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8181/api/catalog/v1/co
           <tr><td>Spark master</td><td><a href="http://localhost:8090"><code>localhost:8090</code></a></td><td>Workers, running apps and drivers submitted via REST 6066</td><td>None</td></tr>
           <tr><td>Spark worker</td><td><a href="http://localhost:8081"><code>localhost:8081</code></a></td><td>Executors/drivers on the worker, their stdout/stderr logs</td><td>None</td></tr>
           <tr><td>Spark Thrift app</td><td><a href="http://localhost:4040"><code>localhost:4040</code></a></td><td>Spark UI of the <code>spark-thrift</code> app (jobs, SQL tab)</td><td>None</td></tr>
-          <tr><td>Spark history</td><td><a href="http://localhost:18080"><code>localhost:18080</code></a></td><td>UIs of finished Spark apps (from the event log)</td><td>None</td></tr>
+          <tr><td>Grafana</td><td><a href="http://localhost:3000"><code>localhost:3000</code></a></td><td>Container logs: dashboard <em>Lakehouse → Container logs</em> (filter by service, search), or Explore with LogQL, e.g. <code>{service="spark-worker"}</code></td><td><code>GRAFANA_ADMIN_USER</code> / <code>GRAFANA_ADMIN_PASSWORD</code></td></tr>
           <tr><td>DataHub</td><td><a href="http://localhost:9002"><code>localhost:9002</code></a></td><td>Dataset search, lineage</td><td><code>datahub</code> / <code>datahub</code> (image default; compose doesn't override it)</td></tr>
         </tbody>
       </table></div>

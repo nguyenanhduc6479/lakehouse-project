@@ -125,27 +125,8 @@ services:
       retries: 5
       start_period: 40s
 
-  spark-history:
-    image: custom-spark:3.5.1
-    container_name: spark-history
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"]
-    environment:
-      SPARK_HISTORY_OPTS: "-Dspark.history.fs.logDirectory=file:///opt/spark/eventlogs -Dspark.history.ui.port=18080"
-    depends_on:
-      spark-master:
-        condition: service_healthy
-    ports:
-      - "18080:18080"    # history server web UI
-    volumes:
-      - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
-      - spark_events_vol:/opt/spark/eventlogs
-    networks: [lakehouse]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:18080 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
+  # spark-history was replaced by Grafana + Loki (compose/monitoring.yml). Event logs are still
+  # written to spark_events_vol, so a history server can be added back without losing data.
 
 volumes:
   spark_events_vol:

@@ -37,8 +37,8 @@ table (`createOrReplace`) so the flow is easy to follow; switch to `MERGE INTO` 
                                ▼              ▼
 ┌───────────┐  parquet  ┌────────────┐   ┌──────────────────────────────┐
 │ vnstock   │──────────▶│   MinIO    │◀──│ Spark 3.5.1 cluster          │
-│ (source)  │           │  (S3, data)│   │ master · worker · thrift ·   │
-└───────────┘           └─────▲──────┘   │ history                      │
+│ (source)  │           │  (S3, data)│   │ master · worker · thrift     │
+└───────────┘           └─────▲──────┘   │                              │
                               │          └──────────────┬───────────────┘
                    read/write │                         │ Iceberg REST + OAuth2
                    data files │                         ▼
@@ -50,7 +50,7 @@ table (`createOrReplace`) so the flow is easy to follow; switch to `MERGE INTO` 
    DataHub v0.12.1 (lineage/metadata) ── Kafka · Zookeeper · Elasticsearch · schema-registry ──┘
 ```
 
-`docker-compose.yml` only `include`s the 7 modules in `compose/` and declares the shared network:
+`docker-compose.yml` only `include`s the 8 modules in `compose/` and declares the shared network:
 
 | Module | Main services |
 |---|---|
@@ -58,13 +58,14 @@ table (`createOrReplace`) so the flow is easy to follow; switch to `MERGE INTO` 
 | `storage.yml` | MinIO |
 | `catalog.yml` | Polaris (+ bootstrap, setup) |
 | `datahub.yml` | DataHub GMS, frontend, actions, schema-registry |
-| `spark.yml` | Spark master, worker, thrift, history |
+| `spark.yml` | Spark master, worker, thrift |
 | `trino.yml` | Trino |
 | `airflow.yml` | Airflow init, webserver, scheduler |
+| `monitoring.yml` | Grafana, Loki, Alloy (container logs) |
 
-## 3. Services (27 containers)
+## 3. Services (29 containers)
 
-### Long-running services (17)
+### Long-running services (19)
 
 | Service | Image | Role | Host port |
 |---|---|---|---|
@@ -74,7 +75,6 @@ table (`createOrReplace`) so the flow is easy to follow; switch to `MERGE INTO` 
 | `spark-master` | `custom-spark:3.5.1` | Spark master + REST submit | 8090 (UI), 7077 (RPC), 6066 (REST) |
 | `spark-worker` | `custom-spark:3.5.1` | Executor/driver (`SPARK_WORKER_CORES`/`_MEMORY`, 4 cores / 3 GB) | 8081 |
 | `spark-thrift` | `custom-spark:3.5.1` | Hive Thrift JDBC for dbt | 10000, 4040 (UI) |
-| `spark-history` | `custom-spark:3.5.1` | Spark History Server | 18080 |
 | `trino` | `trinodb/trino:454` | SQL query engine | 8080 |
 | `airflow-webserver` | `custom-airflow:2.9.2` | Airflow UI | 8085 |
 | `airflow-scheduler` | `custom-airflow:2.9.2` | Scheduling + task execution (LocalExecutor) | — |
@@ -85,6 +85,9 @@ table (`createOrReplace`) so the flow is easy to follow; switch to `MERGE INTO` 
 | `datahub-gms` | `linkedin/datahub-gms:v0.12.1` | Metadata API | 8083 |
 | `datahub-frontend-react` | `linkedin/datahub-frontend-react:v0.12.1` | DataHub UI | 9002 |
 | `datahub-actions` | `acryldata/datahub-actions:v0.0.14` | Actions framework | — |
+| `loki` | `grafana/loki:3.7.8` | Log store (7-day retention) | — |
+| `alloy` | `grafana/alloy:v1.20.1` | Tails container logs via the Docker socket → Loki | — |
+| `grafana` | `grafana/grafana:13.2.3` | Log UI (Loki datasource + "Container logs" dashboard) | 3000 |
 
 "—" = reachable only inside the Docker network (verified with `docker ps`). Kafka advertises a
 `localhost:9092` listener but **does not publish the port**, so it can't be reached from the host.
@@ -117,11 +120,12 @@ postgres ─▶ postgres-setup ─┬─▶ polaris-bootstrap ─▶ polaris ─
                             │                                 └─▶ trino
                             └─▶ airflow-init ─▶ airflow-webserver, airflow-scheduler
 minio ─▶ minio-setup
-spark-master ─▶ spark-worker, spark-history;  spark-fix-permissions + spark-master ─▶ spark-thrift
+spark-master ─▶ spark-worker;  spark-fix-permissions + spark-master ─▶ spark-thrift
 zookeeper ─▶ kafka ─┬─▶ kafka-setup ─────────────────┐
                     └─▶ schema-registry ─────────────┤
 elasticsearch ─▶ datahub-elasticsearch-setup ────────┼─▶ datahub-upgrade ─▶ datahub-gms ─┬─▶ datahub-frontend-react
 postgres-setup ─▶ datahub-postgres-setup ────────────┘                                  └─▶ datahub-actions
+loki ─▶ alloy (healthy = alloy + loki ready) ─▶ grafana
 ```
 
 The Nth `docker compose up -d` still succeeds: every setup job is idempotent (verified).
@@ -218,10 +222,12 @@ containers via `environment:`. Variable groups:
 | Polaris | `POLARIS_SECRET`, `POLARIS_ADMIN_USERNAME`, `POLARIS_ADMIN_PASSWORD` |
 | Airflow | `AIRFLOW_ADMIN_USER`, `AIRFLOW_ADMIN_USERNAME`, `AIRFLOW_ADMIN_PASSWORD`, `AIRFLOW_FERNET_KEY` |
 | DataHub | `DATAHUB_ADMIN_USERNAME`, `DATAHUB_ADMIN_PASSWORD`, `DATAHUB_SECRET_KEY` |
+| Grafana | `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` |
 
 **Named volumes** (prefixed `lakehouse-project_`): `postgres_data_vol`, `minio_data_vol`,
 `spark_events_vol`, `airflow_logs_vol`, `kafka_data_vol`, `kafka_secret_vol`,
-`zookeeper_data_vol`, `zookeeper_log_vol`, `zookeeper_secret_vol`, `elasticsearch_data_vol`.
+`zookeeper_data_vol`, `zookeeper_log_vol`, `zookeeper_secret_vol`, `elasticsearch_data_vol`,
+`loki_data_vol`, `alloy_data_vol`, `grafana_data_vol`.
 `docker compose down` keeps volumes; add `-v` to wipe everything.
 
 **MinIO layout** (bucket `lakehouse`):
@@ -252,6 +258,9 @@ shell scripts and docs are written in English.
 - Airflow loads the DAG with no import errors, has all 5 connections, and reaches Spark REST,
   Polaris, MinIO, Trino and DataHub.
 - pytest: 4/4 on the host, 7/7 Spark tests in the container.
+- Later that day `spark-history` was replaced by Grafana + Loki + Alloy: all three come up
+  (Alloy/Grafana healthy), logs of every running container reach Loki, and Grafana's Loki
+  datasource and "Container logs" dashboard are provisioned.
 
 **Limitations:**
 
@@ -264,13 +273,14 @@ shell scripts and docs are written in English.
 | `pyarrow` mismatch | Airflow 14.0.2 (required by constraints) vs `pyproject.toml` 15.0.2 | |
 | Kafka/ES have no host ports | Can't connect from the host | Add `ports:` if needed |
 | DataHub lineage | Not yet verified in the UI | |
+| Alloy only tails running containers | Logs of one-shot jobs that exited before Alloy started aren't in Loki | Use `docker logs <job>` for those |
 
 ## 12. Operations
 
 Run **inside WSL**, from the repo root:
 
 ```bash
-docker compose config --quiet          # check the 7 modules merge cleanly
+docker compose config --quiet          # check the 8 modules merge cleanly
 docker compose build                   # build custom-spark, custom-airflow
 docker compose up -d                   # start the whole stack
 docker compose ps -a                   # status + health
@@ -312,7 +322,7 @@ Credential variables refer to `.env`.
 | Spark master | <http://localhost:8090> | Workers, running apps and drivers submitted via REST 6066 | None |
 | Spark worker | <http://localhost:8081> | Executors/drivers on the worker, their stdout/stderr logs | None |
 | Spark Thrift app | <http://localhost:4040> | Spark UI of the `spark-thrift` app (jobs, SQL tab) | None |
-| Spark history | <http://localhost:18080> | UIs of finished Spark apps (from the event log) | None |
+| Grafana | <http://localhost:3000> | Container logs: dashboard *Lakehouse → Container logs* (filter by service, search), or Explore with LogQL, e.g. `{service="spark-worker"}` | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` |
 | DataHub | <http://localhost:9002> | Dataset search, lineage | `datahub` / `datahub` (image default; compose doesn't override it) |
 
 Ports that answer but have **no web UI** (APIs only): MinIO S3 API `:9000`, Polaris `:8181`
