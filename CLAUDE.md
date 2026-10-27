@@ -66,7 +66,10 @@ Layers:
   `iceberg-aws-bundle`, which carry the REST catalog client — no Nessie), Postgres, Kafka, and
   acryl DataHub-lineage JARs. Services: `spark-master` (RPC 7077, UI 8090→8080, REST 6066),
   `spark-worker` (UI 8081), `spark-thrift` (Hive Thrift JDBC on 10000 for dbt, app UI 4040),
-  `spark-history` (18080). Job code lives in `./spark/jobs`, mounted at `/opt/spark/jobs` with
+  `spark-history` (18080). Worker size comes from `SPARK_WORKER_CORES`/`SPARK_WORKER_MEMORY` in
+  `.env` (4 cores / 3G). `spark-thrift` is a long-running app capped at `spark.cores.max=1` +
+  512m executor — without the cap Standalone gives it every worker core and REST-submitted
+  pipeline jobs wait forever. Job code lives in `./spark/jobs`, mounted at `/opt/spark/jobs` with
   `PYTHONPATH=/opt/spark/jobs`.
 - **Transform** (`./dbt`): **dbt** with the `dbt-spark` adapter connecting over **thrift** to
   `spark-thrift:10000`, default schema `silver` (`dbt/profiles.yml`). The whole `./dbt` dir is

@@ -72,7 +72,7 @@ table (`createOrReplace`) so the flow is easy to follow; switch to `MERGE INTO` 
 | `minio` | `minio/minio` | S3 object storage, holds every data file | 9000 (API), 9001 (console) |
 | `polaris` | `apache/polaris:1.5.0` | Iceberg REST catalog, OAuth2 | 8181 |
 | `spark-master` | `custom-spark:3.5.1` | Spark master + REST submit | 8090 (UI), 7077 (RPC), 6066 (REST) |
-| `spark-worker` | `custom-spark:3.5.1` | Executor/driver (2 cores, 2 GB) | 8081 |
+| `spark-worker` | `custom-spark:3.5.1` | Executor/driver (`SPARK_WORKER_CORES`/`_MEMORY`, 4 cores / 3 GB) | 8081 |
 | `spark-thrift` | `custom-spark:3.5.1` | Hive Thrift JDBC for dbt | 10000, 4040 (UI) |
 | `spark-history` | `custom-spark:3.5.1` | Spark History Server | 18080 |
 | `trino` | `trinodb/trino:454` | SQL query engine | 8080 |
@@ -299,8 +299,25 @@ venv/bin/python -m pytest -m "not spark"        # host (WSL), no Java needed
 # Spark tests: run in spark-master (see CLAUDE.md, Common commands)
 ```
 
-Web UIs: MinIO console `:9001` · Spark `:8090` · Spark history `:18080` · Trino `:8080` ·
-Airflow `:8085` · DataHub `:9002`.
+### Web UIs
+
+Every UI below is published on the host and answers once the stack is up (checked 2026-10-27).
+Credential variables refer to `.env`.
+
+| UI | URL | What it's for | Login |
+|---|---|---|---|
+| MinIO console | <http://localhost:9001> | Browse bucket `lakehouse` (bronze/silver/gold files, landing parquet) | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` |
+| Airflow | <http://localhost:8085> | Unpause/trigger DAG `lakehouse_ohlcv`, task logs, connections | `AIRFLOW_ADMIN_USER` / `AIRFLOW_ADMIN_PASSWORD` |
+| Trino | <http://localhost:8080> (redirects to `/ui/`) | Running/finished queries and cluster status (no SQL editor) | Any username, no password |
+| Spark master | <http://localhost:8090> | Workers, running apps and drivers submitted via REST 6066 | None |
+| Spark worker | <http://localhost:8081> | Executors/drivers on the worker, their stdout/stderr logs | None |
+| Spark Thrift app | <http://localhost:4040> | Spark UI of the `spark-thrift` app (jobs, SQL tab) | None |
+| Spark history | <http://localhost:18080> | UIs of finished Spark apps (from the event log) | None |
+| DataHub | <http://localhost:9002> | Dataset search, lineage | `datahub` / `datahub` (image default; compose doesn't override it) |
+
+Ports that answer but have **no web UI** (APIs only): MinIO S3 API `:9000`, Polaris `:8181`
+(an unauthenticated `GET /api/catalog/v1/config` → 401), Spark REST submit `:6066`, DataHub GMS
+`:8083`, Spark Thrift JDBC `:10000`, Postgres `:5432`.
 
 ## 13. Appendix: pitfalls hit while building
 

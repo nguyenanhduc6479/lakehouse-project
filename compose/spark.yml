@@ -29,7 +29,7 @@ services:
     ports:
       - "7077:7077"      # master RPC
       - "8090:8080"      # master web UI (8090 on host, avoids clashing with Trino 8080)
-      - "6066:6066"      # REST API cho cluster mode submit
+      - "6066:6066"      # REST API for cluster-mode submit
     volumes:
       - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
       - ../spark/jobs:/opt/spark/jobs
@@ -57,10 +57,11 @@ services:
       - "/opt/spark/bin/spark-class"
       - "org.apache.spark.deploy.worker.Worker"
       - "spark://spark-master:7077"
+      # sized in .env; must fit the capped thrift app + one pipeline job (driver + executor)
       - "--cores"
-      - "2"
+      - "${SPARK_WORKER_CORES}"
       - "--memory"
-      - "2G"
+      - "${SPARK_WORKER_MEMORY}"
     depends_on:
       spark-master:
         condition: service_healthy
@@ -89,6 +90,12 @@ services:
       - "hive.server2.thrift.port=10000"
       - "--hiveconf"
       - "hive.server2.thrift.bind.host=0.0.0.0"
+      # The thrift server is a long-running app; without a cap Standalone hands it every
+      # worker core, so pipeline jobs submitted via REST 6066 would wait forever for one.
+      - "--conf"
+      - "spark.cores.max=1"
+      - "--conf"
+      - "spark.executor.memory=512m"
     environment:
       SPARK_NO_DAEMONIZE: "true"    # run in the foreground so the container doesn't exit
       # prepared for the later dbt phase (thrift still needs the catalog config in
@@ -105,7 +112,7 @@ services:
       spark-fix-permissions:
         condition: service_completed_successfully
     ports:
-      - "10000:10000"    # JDBC cho dbt-spark
+      - "10000:10000"    # JDBC for dbt-spark
       - "4040:4040"      # Spark UI of the thrift app
     volumes:
       - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf

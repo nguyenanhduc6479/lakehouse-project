@@ -1,7 +1,7 @@
 [project]
 name = "lakehouse-pipeline"
 version = "0.1.0"
-description = "Pipeline medallion OHLCV (ingest -> bronze -> silver -> gold) cho lakehouse local"
+description = "Medallion OHLCV pipeline (ingest -> bronze -> silver -> gold) for a local lakehouse"
 requires-python = ">=3.11"
 
 # Dev deps managed by uv (uv sync --group dev / uv run pytest).

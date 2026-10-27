@@ -467,7 +467,7 @@
           <tr><td><code>minio</code></td><td><code>minio/minio</code></td><td>S3 object storage, holds every data file</td><td>9000 (API), 9001 (console)</td></tr>
           <tr><td><code>polaris</code></td><td><code>apache/polaris:1.5.0</code></td><td>Iceberg REST catalog, OAuth2</td><td>8181</td></tr>
           <tr><td><code>spark-master</code></td><td><code>custom-spark:3.5.1</code></td><td>Spark master + REST submit</td><td>8090 (UI), 7077 (RPC), 6066 (REST)</td></tr>
-          <tr><td><code>spark-worker</code></td><td><code>custom-spark:3.5.1</code></td><td>Executor/driver (2 cores, 2 GB)</td><td>8081</td></tr>
+          <tr><td><code>spark-worker</code></td><td><code>custom-spark:3.5.1</code></td><td>Executor/driver (<code>SPARK_WORKER_CORES</code>/<code>_MEMORY</code>, 4 cores / 3 GB)</td><td>8081</td></tr>
           <tr><td><code>spark-thrift</code></td><td><code>custom-spark:3.5.1</code></td><td>Hive Thrift JDBC for dbt</td><td>10000, 4040 (UI)</td></tr>
           <tr><td><code>spark-history</code></td><td><code>custom-spark:3.5.1</code></td><td>Spark History Server</td><td>18080</td></tr>
           <tr><td><code>trino</code></td><td><code>trinodb/trino:454</code></td><td>SQL query engine</td><td>8080</td></tr>
@@ -682,17 +682,21 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8181/api/catalog/v1/co
 <pre><code>venv/bin/python -m pytest -m "not spark"        # host (WSL), no Java needed
 # Spark tests: run in spark-master (see CLAUDE.md, Common commands)</code></pre>
       <h3>Web UIs</h3>
+      <p>Every UI below is published on the host and answers once the stack is up (checked 2026-10-27). Credential variables refer to <code>.env</code>.</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>UI</th><th>Address</th></tr></thead>
+        <thead><tr><th>UI</th><th>URL</th><th>What it's for</th><th>Login</th></tr></thead>
         <tbody>
-          <tr><td>MinIO console</td><td><code>http://localhost:9001</code></td></tr>
-          <tr><td>Spark master</td><td><code>http://localhost:8090</code></td></tr>
-          <tr><td>Spark history</td><td><code>http://localhost:18080</code></td></tr>
-          <tr><td>Trino</td><td><code>http://localhost:8080</code></td></tr>
-          <tr><td>Airflow</td><td><code>http://localhost:8085</code></td></tr>
-          <tr><td>DataHub</td><td><code>http://localhost:9002</code></td></tr>
+          <tr><td>MinIO console</td><td><a href="http://localhost:9001"><code>localhost:9001</code></a></td><td>Browse bucket <code>lakehouse</code> (bronze/silver/gold files, landing parquet)</td><td><code>MINIO_ROOT_USER</code> / <code>MINIO_ROOT_PASSWORD</code></td></tr>
+          <tr><td>Airflow</td><td><a href="http://localhost:8085"><code>localhost:8085</code></a></td><td>Unpause/trigger DAG <code>lakehouse_ohlcv</code>, task logs, connections</td><td><code>AIRFLOW_ADMIN_USER</code> / <code>AIRFLOW_ADMIN_PASSWORD</code></td></tr>
+          <tr><td>Trino</td><td><a href="http://localhost:8080"><code>localhost:8080</code></a></td><td>Running/finished queries and cluster status (no SQL editor); redirects to <code>/ui/</code></td><td>Any username, no password</td></tr>
+          <tr><td>Spark master</td><td><a href="http://localhost:8090"><code>localhost:8090</code></a></td><td>Workers, running apps and drivers submitted via REST 6066</td><td>None</td></tr>
+          <tr><td>Spark worker</td><td><a href="http://localhost:8081"><code>localhost:8081</code></a></td><td>Executors/drivers on the worker, their stdout/stderr logs</td><td>None</td></tr>
+          <tr><td>Spark Thrift app</td><td><a href="http://localhost:4040"><code>localhost:4040</code></a></td><td>Spark UI of the <code>spark-thrift</code> app (jobs, SQL tab)</td><td>None</td></tr>
+          <tr><td>Spark history</td><td><a href="http://localhost:18080"><code>localhost:18080</code></a></td><td>UIs of finished Spark apps (from the event log)</td><td>None</td></tr>
+          <tr><td>DataHub</td><td><a href="http://localhost:9002"><code>localhost:9002</code></a></td><td>Dataset search, lineage</td><td><code>datahub</code> / <code>datahub</code> (image default; compose doesn't override it)</td></tr>
         </tbody>
       </table></div>
+      <p class="note info">Ports that answer but have <strong>no web UI</strong> (APIs only): MinIO S3 API <code>:9000</code>, Polaris <code>:8181</code> (an unauthenticated <code>GET /api/catalog/v1/config</code> → 401), Spark REST submit <code>:6066</code>, DataHub GMS <code>:8083</code>, Spark Thrift JDBC <code>:10000</code>, Postgres <code>:5432</code>.</p>
     </section>
 
     <!-- 13 -->
