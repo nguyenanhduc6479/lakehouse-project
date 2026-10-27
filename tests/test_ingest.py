@@ -1,4 +1,4 @@
-"""Test run_ingest: mock vnstock (_fetch_symbol) + boto3 — không gọi mạng/MinIO thật."""
+"""Test run_ingest: mocks vnstock (_fetch_symbol) + boto3 — no real network/MinIO calls."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from ingest_ohlcv import LANDING_PREFIX, run_ingest
 
 
 def _fake_df(symbol: str, n: int = 3) -> pd.DataFrame:
-    """Giả lập kết quả vnstock Quote.history cho 1 mã (sau khi _fetch_symbol gắn symbol/source)."""
+    """Fake vnstock Quote.history result for 1 symbol (after _fetch_symbol adds symbol/source)."""
     return pd.DataFrame(
         {
             "time": pd.date_range("2024-01-02", periods=n, freq="D"),
@@ -27,7 +27,7 @@ def _fake_df(symbol: str, n: int = 3) -> pd.DataFrame:
 
 
 def _run(mocker, fetch_side_effect, symbols):
-    """Chạy run_ingest với _fetch_symbol và boto3.client đã bị mock. Trả về (key, s3_mock)."""
+    """Run run_ingest with _fetch_symbol and boto3.client mocked. Returns (key, s3_mock)."""
     mocker.patch.object(ingest_ohlcv, "_fetch_symbol", side_effect=fetch_side_effect)
     s3 = mocker.MagicMock()
     mocker.patch("boto3.client", return_value=s3)
@@ -53,11 +53,11 @@ def test_writes_one_parquet_to_expected_key(mocker):
     assert kwargs["Bucket"] == "lakehouse"
     assert kwargs["Key"] == key
 
-    # Body là parquet hợp lệ, gồm cả 2 mã + cột ingested_at do run_ingest thêm.
+    # Body is valid parquet with both symbols + the ingested_at column added by run_ingest.
     back = pd.read_parquet(io.BytesIO(kwargs["Body"]))
     assert set(back["symbol"]) == {"FPT", "VNM"}
     assert "ingested_at" in back.columns
-    assert len(back) == 6  # 3 dòng/mã × 2 mã
+    assert len(back) == 6  # 3 rows/symbol × 2 symbols
 
 
 def test_skips_empty_symbol(mocker):
@@ -66,18 +66,18 @@ def test_skips_empty_symbol(mocker):
 
     _, s3 = _run(mocker, fetch, ["FPT", "VNM"])
     back = pd.read_parquet(io.BytesIO(s3.put_object.call_args.kwargs["Body"]))
-    assert set(back["symbol"]) == {"FPT"}  # VNM rỗng bị bỏ qua
+    assert set(back["symbol"]) == {"FPT"}  # empty VNM is skipped
 
 
 def test_symbol_error_is_isolated(mocker):
     def fetch(sym, start, end):
         if sym == "VNM":
-            raise ValueError("API lỗi")
+            raise ValueError("API error")
         return _fake_df(sym)
 
     _, s3 = _run(mocker, fetch, ["FPT", "VNM"])
     back = pd.read_parquet(io.BytesIO(s3.put_object.call_args.kwargs["Body"]))
-    assert set(back["symbol"]) == {"FPT"}  # lỗi 1 mã không làm hỏng cả batch
+    assert set(back["symbol"]) == {"FPT"}  # one symbol failing doesn't break the whole batch
 
 
 def test_all_empty_raises(mocker):

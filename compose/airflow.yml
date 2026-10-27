@@ -12,7 +12,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     TZ: Asia/Ho_Chi_Minh
-    # MinIO cho task ingest (chạy trong scheduler) ghi parquet landing — lấy từ .env
+    # MinIO for the ingest task (runs in the scheduler) to write landing parquet — from .env
     MINIO_ENDPOINT: ${MINIO_ENDPOINT}
     MINIO_ROOT_USER: ${MINIO_ROOT_USER}
     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -28,7 +28,7 @@ services:
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
-    # chờ postgres-setup tạo database 'airflow' trước khi chạy db migrate
+    # wait for postgres-setup to create the 'airflow' database before running db migrate
     depends_on:
       postgres-setup:
         condition: service_completed_successfully
@@ -71,7 +71,7 @@ services:
         condition: service_completed_successfully
     command: ["airflow", "webserver"]
     ports:
-      - "8085:8080"      # web UI (8085 host, tránh đụng Trino 8080)
+      - "8085:8080"      # web UI (8085 on host, avoids clashing with Trino 8080)
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 30s

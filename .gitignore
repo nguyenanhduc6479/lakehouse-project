@@ -1,12 +1,12 @@
 # ---------------------------------------------------------------------------
-# Lý do: .env chứa toàn bộ credential (POSTGRES_PASSWORD, POLARIS_SECRET,
-# API_KEY, MINIO_ROOT_PASSWORD...). TUYỆT ĐỐI không đẩy lên git.
+# Reason: .env holds every credential (POSTGRES_PASSWORD, POLARIS_SECRET,
+# API_KEY, MINIO_ROOT_PASSWORD...). NEVER push it to git.
 # ---------------------------------------------------------------------------
 .env
 .env.*
 !.env.example
 
-# venv tạm dùng để verify vnstock — không thuộc stack, có thể xoá bất cứ lúc nào
+# temporary venv used to verify vnstock — not part of the stack, safe to delete any time
 .scratch_vnstock/
 
 # Python
@@ -23,7 +23,7 @@ dbt/target/
 dbt/dbt_packages/
 dbt/logs/
 
-# Claude Code: settings cá nhân theo máy (giữ settings.json chung nếu có)
+# Claude Code: per-machine personal settings (keep the shared settings.json if any)
 .claude/settings.local.json
 
 # IDE / OS
@@ -33,5 +33,5 @@ dbt/logs/
 .DS_Store
 Thumbs.db
 
-# Logs cục bộ
+# Local logs
 *.log

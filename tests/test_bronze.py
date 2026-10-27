@@ -1,4 +1,4 @@
-"""Test transform_bronze: khử trùng lặp giữ bản mới nhất theo ingested_at."""
+"""Test transform_bronze: dedup keeps the latest row by ingested_at."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import date, datetime
 import pytest
 from job_bronze import transform_bronze
 
-# Cần SparkSession thật (JVM) -> chạy trong container Linux, bỏ qua trên host Windows bằng
+# Needs a real SparkSession (JVM) -> run in the Linux container; skip on a Windows host with
 #   uv run pytest -m "not spark"
 pytestmark = pytest.mark.spark
 
@@ -20,18 +20,18 @@ COLUMNS = ["time", "open", "high", "low", "close", "volume", "symbol", "source",
 
 
 def test_dedup_keeps_latest_ingested_at(spark):
-    # Cùng (FPT, 2024-01-02) xuất hiện 2 lần ở 2 lần ingest khác nhau -> giữ bản ingest sau.
+    # The same (FPT, 2024-01-02) appears in 2 different ingests -> keep the later ingest.
     rows = [
         _row(datetime(2024, 1, 2), close=20.0, ingested_at=datetime(2024, 1, 2, 18, 0)),
-        _row(datetime(2024, 1, 2), close=21.5, ingested_at=datetime(2024, 1, 3, 18, 0)),  # mới hơn
+        _row(datetime(2024, 1, 2), close=21.5, ingested_at=datetime(2024, 1, 3, 18, 0)),  # newer
         _row(datetime(2024, 1, 3), close=22.0, ingested_at=datetime(2024, 1, 3, 18, 0)),
     ]
     df = spark.createDataFrame(rows, COLUMNS)
 
     out = {(r["symbol"], r["trade_date"]): r["close"] for r in transform_bronze(df).collect()}
 
-    assert len(out) == 2  # 2 ngày phân biệt
-    assert out[("FPT", date(2024, 1, 2))] == 21.5  # giữ close của bản ingest mới nhất
+    assert len(out) == 2  # 2 distinct days
+    assert out[("FPT", date(2024, 1, 2))] == 21.5  # keeps the close of the latest ingest
     assert out[("FPT", date(2024, 1, 3))] == 22.0
 
 
@@ -42,5 +42,5 @@ def test_output_has_trade_date_and_no_time(spark):
     )
     cols = transform_bronze(df).columns
     assert "trade_date" in cols
-    assert "time" not in cols  # đã đổi sang trade_date
-    assert "_rn" not in cols  # cột phụ dedupe không lọt ra ngoài
+    assert "time" not in cols  # renamed to trade_date
+    assert "_rn" not in cols  # helper dedupe column doesn't leak out

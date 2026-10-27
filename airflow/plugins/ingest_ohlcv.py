@@ -1,15 +1,17 @@
-"""Tầng INGEST: kéo OHLCV ngày từ vnstock và đổ parquet thô xuống MinIO (landing).
+"""INGEST layer: pull daily OHLCV from vnstock and drop raw parquet onto MinIO (landing).
 
-WHY để ở airflow/plugins: thư mục này được mount vào Airflow (xem compose/airflow.yml),
-nên DAG import trực tiếp `run_ingest`. Đồng thời file có CLI `__main__` để chạy tay bằng
-venv local (ví dụ .scratch_vnstock) khi debug — không cần Airflow.
+WHY in airflow/plugins: this directory is mounted into Airflow (see compose/airflow.yml),
+so the DAG imports `run_ingest` directly. The file also has a `__main__` CLI to run by hand
+from a local venv (e.g. .scratch_vnstock) while debugging — no Airflow needed.
 
-WHY tách ingest ra khỏi Spark: image custom-spark KHÔNG cài vnstock (chỉ có pandas/
-pyarrow). vnstock là client Python thuần gọi API VCI, nên extract chạy phía Python rồi
-land parquet; các job Spark sau đó chỉ việc đọc parquet -> Iceberg. Giữ Spark image gọn.
+WHY ingest is separate from Spark: the custom-spark image does NOT install vnstock (only
+pandas/pyarrow). vnstock is a pure-Python client for the VCI API, so extraction runs in
+Python and lands parquet; the Spark jobs then just read parquet -> Iceberg. Keeps the
+Spark image lean.
 
-WHY dùng boto3 (không s3fs): Airflow đã có boto3 qua provider amazon, thêm s3fs dễ đụng
-phiên bản aiobotocore. Ghi parquet ra buffer bằng pyarrow rồi put_object thẳng lên MinIO.
+WHY boto3 (not s3fs): Airflow already has boto3 via the amazon provider; adding s3fs easily
+clashes on aiobotocore versions. Parquet is written to a buffer with pyarrow, then
+put_object straight to MinIO.
 """
 
 from __future__ import annotations
@@ -21,23 +23,23 @@ from datetime import UTC, date, datetime
 
 logger = logging.getLogger(__name__)
 
-# Khớp DEFAULT_SYMBOLS ở spark/jobs/common.py (giữ 2 nơi đồng bộ bằng mắt vì
-# Python phía Airflow và phía Spark không share được module).
+# Matches DEFAULT_SYMBOLS in spark/jobs/common.py (keep both in sync by hand, since
+# the Airflow-side and Spark-side Python can't share a module).
 DEFAULT_SYMBOLS = ["FPT", "VNM", "ACB", "HPG", "MWG"]
 LANDING_PREFIX = "bronze/_landing/stock_ohlcv"
 
 
 def _fetch_symbol(symbol: str, start: str, end: str):
-    """Lấy OHLCV ngày của 1 mã. Import vnstock bên trong hàm.
+    """Fetch daily OHLCV for 1 symbol. Imports vnstock inside the function.
 
-    WHY import lazy: Airflow scheduler parse file plugin khi nạp DAG; nếu import vnstock
-    ở top-level mà image chưa cài thì cả DAG lỗi import. Import trong hàm -> chỉ lỗi khi
-    task thực sự chạy, và chạy CLI local vẫn ổn.
+    WHY a lazy import: the Airflow scheduler parses plugin files when loading DAGs; importing
+    vnstock at top level while the image lacks it would break the whole DAG import. Importing
+    inside the function -> it only fails when the task actually runs, and the local CLI still works.
     """
-    from vnstock.api.quote import Quote  # verified 2026-10-27: trả time/open/high/low/close/volume
+    from vnstock.api.quote import Quote  # verified 2026-10-27: time/open/high/low/close/volume
 
     df = Quote(symbol=symbol, source="VCI").history(start=start, end=end, interval="1D")
-    # vnstock trả cột 'time' (datetime64), open/high/low/close (float), volume (int)
+    # vnstock returns column 'time' (datetime64), open/high/low/close (float), volume (int)
     df = df.assign(symbol=symbol, source="VCI")
     return df
 
@@ -53,10 +55,10 @@ def run_ingest(
     bucket: str = "lakehouse",
     ingest_date: str | None = None,
 ) -> str:
-    """Kéo OHLCV cho `symbols` trong [start, end] và ghi 1 file parquet lên landing.
+    """Pull OHLCV for `symbols` over [start, end] and write 1 parquet file to landing.
 
-    Idempotent: ghi vào key cố định theo `ingest_date` (mặc định hôm nay) nên chạy lại
-    cùng ngày sẽ ĐÈ file cũ, không sinh rác. Trả về key S3 đã ghi.
+    Idempotent: writes to a fixed key per `ingest_date` (default today), so a re-run on
+    the same day OVERWRITES the old file, leaving no junk. Returns the S3 key written.
     """
     import boto3
     import pandas as pd
@@ -71,22 +73,22 @@ def run_ingest(
         try:
             df = _fetch_symbol(sym, start, end)
             if df is None or df.empty:
-                logger.warning("Mã %s không có dữ liệu trong [%s, %s], bỏ qua.", sym, start, end)
+                logger.warning("Symbol %s has no data in [%s, %s], skipping.", sym, start, end)
                 continue
             frames.append(df)
-            logger.info("Kéo %s: %d dòng.", sym, len(df))
-        except Exception:  # noqa: BLE001 - log và tiếp tục các mã khác, tránh fail cả batch
-            logger.exception("Lỗi khi kéo mã %s, bỏ qua.", sym)
+            logger.info("Fetched %s: %d rows.", sym, len(df))
+        except Exception:  # noqa: BLE001 - log and continue with other symbols, don't fail the whole batch
+            logger.exception("Error fetching symbol %s, skipping.", sym)
 
     if not frames:
-        raise RuntimeError("Không kéo được dữ liệu cho bất kỳ mã nào — dừng ingest.")
+        raise RuntimeError("No data fetched for any symbol — stopping ingest.")
 
-    # Gộp + đóng dấu thời điểm ingest để tầng bronze dedupe theo bản mới nhất.
+    # Concatenate + stamp the ingest time so the bronze layer can dedupe by latest row.
     data = pd.concat(frames, ignore_index=True)
     data["ingested_at"] = ingested_at
-    logger.info("Tổng cộng %d dòng cho %d mã.", len(data), len(frames))
+    logger.info("Total %d rows for %d symbols.", len(data), len(frames))
 
-    # Ghi parquet ra buffer (pyarrow) rồi upload — không chạm đĩa cục bộ.
+    # Write parquet to a buffer (pyarrow) then upload — never touches local disk.
     buf = io.BytesIO()
     data.to_parquet(buf, engine="pyarrow", index=False)
     buf.seek(0)
@@ -97,22 +99,22 @@ def run_ingest(
         endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
-        region_name="us-east-1",  # MinIO bỏ qua region nhưng boto3 cần có giá trị
+        region_name="us-east-1",  # MinIO ignores region but boto3 needs a value
     )
     s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
     uri = f"s3://{bucket}/{key}"
-    logger.info("Đã ghi landing: %s", uri)
+    logger.info("Wrote landing: %s", uri)
     return key
 
 
 def _main() -> None:
-    """CLI chạy tay: đọc config từ cờ dòng lệnh hoặc env (MINIO_*)."""
+    """Manual CLI: reads config from command-line flags or env (MINIO_*)."""
     import os
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    p = argparse.ArgumentParser(description="Ingest OHLCV vnstock -> parquet landing trên MinIO")
+    p = argparse.ArgumentParser(description="Ingest vnstock OHLCV -> landing parquet on MinIO")
     p.add_argument(
-        "--symbols", default=",".join(DEFAULT_SYMBOLS), help="DS mã, phân tách bằng dấu phẩy"
+        "--symbols", default=",".join(DEFAULT_SYMBOLS), help="Comma-separated list of symbols"
     )
     p.add_argument("--start", default="2024-01-01")
     p.add_argument("--end", default=None)

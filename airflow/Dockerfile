@@ -3,7 +3,7 @@ FROM apache/airflow:2.9.2-python3.11
 
 USER root
 
-# thrift-sasl cho PyHive kết nối Spark Thrift Server
+# thrift-sasl for PyHive to connect to the Spark Thrift Server
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsasl2-dev \
  && rm -rf /var/lib/apt/lists/*

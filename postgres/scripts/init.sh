@@ -13,7 +13,7 @@ echo "postgres is ready!"
 echo "starting initialization for postgres"
 
 # 1. functions
-# 1.1. hàm tạo login
+# 1.1. function to create a login
 function create_login() {
     local username=$1
     local password=$2
@@ -41,7 +41,7 @@ function create_login() {
     fi
 }
 
-# 1.2. hàm tạo database
+# 1.2. function to create a database
 function create_database() {
     local database=$1
     local username=$2
@@ -70,8 +70,8 @@ function create_database() {
     fi
 }
 
-# 2. tạo db, login và gắn quyền cho các service
-# 2.1. xử lý cho airflow
+# 2. create db, login and grant privileges for each service
+# 2.1. airflow
 if [ -n "$AIRFLOW_ADMIN_USERNAME" ] && [ -n "$POSTGRES_DB_AIRFLOW" ] && [ -n "$AIRFLOW_ADMIN_PASSWORD" ]; then
     create_login "$AIRFLOW_ADMIN_USERNAME" "$AIRFLOW_ADMIN_PASSWORD"
     create_database "$POSTGRES_DB_AIRFLOW" "$AIRFLOW_ADMIN_USERNAME"
@@ -79,7 +79,7 @@ else
     echo "warning: missing airflow vars."
 fi
 
-# 2.2. xử lý cho datahub
+# 2.2. datahub
 if [ -n "$DATAHUB_ADMIN_USERNAME" ] && [ -n "$POSTGRES_DB_DATAHUB" ] && [ -n "$DATAHUB_ADMIN_PASSWORD" ]; then
     create_login "$DATAHUB_ADMIN_USERNAME" "$DATAHUB_ADMIN_PASSWORD"
     create_database "$POSTGRES_DB_DATAHUB" "$DATAHUB_ADMIN_USERNAME"
@@ -87,7 +87,7 @@ else
     echo "warning: missing datahub vars."
 fi
 
-# 2.3. xử lý cho poleris
+# 2.3. polaris
 if [ -n "$POLARIS_ADMIN_USERNAME" ] && [ -n "$POSTGRES_DB_POLARIS" ] && [ -n "$POLARIS_ADMIN_PASSWORD" ]; then
     create_login "$POLARIS_ADMIN_USERNAME" "$POLARIS_ADMIN_PASSWORD"
     create_database "$POSTGRES_DB_POLARIS" "$POLARIS_ADMIN_USERNAME"

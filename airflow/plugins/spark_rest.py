@@ -1,12 +1,12 @@
-"""Submit PySpark job qua Spark Standalone REST API (cluster mode) + chờ kết quả.
+"""Submit a PySpark job via the Spark Standalone REST API (cluster mode) + wait for the result.
 
-WHY REST 6066 (không SparkSubmitOperator): repo chọn submit job qua Spark Standalone
-REST API ở spark-master:6066 (xem CLAUDE.md), driver chạy trên spark-worker — Airflow
-KHÔNG cần cài spark-submit/Java. Đây là API ẩn của Spark Standalone nên payload khá
-khó tính; giữ nguyên các field bắt buộc bên dưới.
+WHY REST 6066 (not SparkSubmitOperator): the repo submits jobs through the Spark Standalone
+REST API at spark-master:6066 (see CLAUDE.md) and the driver runs on spark-worker — Airflow
+does NOT need spark-submit/Java installed. This is a hidden Spark Standalone API, so the
+payload is picky; keep the required fields below as they are.
 
-Lưu ý: appResource/pyFiles là đường dẫn file:// NẰM TRÊN WORKER (thư mục
-/opt/spark/jobs đã mount vào cả master lẫn worker qua compose/spark.yml).
+Note: appResource/pyFiles are file:// paths ON THE WORKER (the /opt/spark/jobs
+directory is mounted into both master and worker via compose/spark.yml).
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ SPARK_VERSION = "3.5.1"
 
 
 def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: int = 1800) -> None:
-    """Submit `job_file` (vd 'job_bronze.py') và chặn tới khi FINISHED, raise nếu FAILED.
+    """Submit `job_file` (e.g. 'job_bronze.py') and block until FINISHED; raise if FAILED.
 
-    common.py được gửi kèm qua spark.submit.pyFiles để job import được.
+    common.py is shipped along via spark.submit.pyFiles so the job can import it.
     """
     app_resource = f"file:{JOBS_DIR}/{job_file}"
     payload = {
@@ -51,8 +51,8 @@ def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: i
     body = resp.json()
     sub_id = body.get("submissionId")
     if not body.get("success") or not sub_id:
-        raise RuntimeError(f"Submit thất bại cho {job_file}: {body}")
-    logger.info("Đã submit %s, submissionId=%s", job_file, sub_id)
+        raise RuntimeError(f"Submit failed for {job_file}: {body}")
+    logger.info("Submitted %s, submissionId=%s", job_file, sub_id)
 
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
@@ -63,5 +63,5 @@ def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: i
         if state == "FINISHED":
             return
         if state in {"FAILED", "ERROR", "KILLED"}:
-            raise RuntimeError(f"Job {job_file} kết thúc trạng thái {state}: {st}")
-    raise TimeoutError(f"Job {job_file} quá {timeout_seconds}s chưa xong.")
+            raise RuntimeError(f"Job {job_file} ended in state {state}: {st}")
+    raise TimeoutError(f"Job {job_file} did not finish within {timeout_seconds}s.")

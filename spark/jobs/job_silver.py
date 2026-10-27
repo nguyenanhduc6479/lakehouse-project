@@ -1,14 +1,14 @@
-"""SILVER: làm sạch bronze -> bảng Iceberg lakehouse.silver.stock_ohlcv.
+"""SILVER: clean bronze -> Iceberg table lakehouse.silver.stock_ohlcv.
 
-Luật làm sạch (data quality) cho OHLCV:
-- bỏ dòng thiếu khoá (symbol/trade_date null),
-- giữ giá hợp lệ: open/high/low/close > 0,
-- bất biến nến: high >= low, high >= max(open, close), low <= min(open, close),
+Cleaning (data quality) rules for OHLCV:
+- drop rows missing a key (null symbol/trade_date),
+- keep valid prices: open/high/low/close > 0,
+- candle invariants: high >= low, high >= max(open, close), low <= min(open, close),
 - volume >= 0.
 
-Logic lọc tách ra `clean_silver()` (hàm thuần) để unit-test; `main()` lo I/O và
-in các chỉ số data-quality (row-count / null-count) đúng convention repo, rồi
-assert silver không rỗng trước khi ghi.
+Filtering lives in `clean_silver()` (a pure function) for unit tests; `main()` handles
+I/O, logs data-quality metrics (row-count / null-count) per repo convention, then
+asserts silver is non-empty before writing.
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 SRC = f"{CATALOG}.bronze.stock_ohlcv"
 TABLE = f"{CATALOG}.silver.stock_ohlcv"
 
-# Cột đầu ra của silver (khai báo rõ để giữ hợp đồng schema ổn định cho gold/Trino).
+# Silver output columns (declared explicitly to keep a stable schema contract for gold/Trino).
 SILVER_COLUMNS = ["symbol", "trade_date", "open", "high", "low", "close", "volume"]
 
 
 def clean_silver(bronze: DataFrame) -> DataFrame:
-    """Áp luật DQ, trả về DataFrame sạch với đúng SILVER_COLUMNS. Hàm thuần."""
+    """Apply DQ rules, return a clean DataFrame with exactly SILVER_COLUMNS. Pure function."""
     return bronze.where(
         F.col("symbol").isNotNull()
         & F.col("trade_date").isNotNull()
@@ -49,15 +49,15 @@ def main() -> None:
     bronze = spark.table(SRC)
     total = bronze.count()
     null_keys = bronze.where(F.col("symbol").isNull() | F.col("trade_date").isNull()).count()
-    logger.warning("Bronze: %d dòng, %d dòng null khoá.", total, null_keys)
+    logger.warning("Bronze: %d rows, %d rows with null keys.", total, null_keys)
 
     clean = clean_silver(bronze)
     kept = clean.count()
-    logger.warning("Silver: giữ %d / %d dòng (loại %d).", kept, total, total - kept)
+    logger.warning("Silver: kept %d / %d rows (dropped %d).", kept, total, total - kept)
 
-    # Assertion: silver rỗng gần như chắc chắn là lỗi cấu hình/nguồn -> fail job sớm.
+    # Assertion: an empty silver almost certainly means a config/source error -> fail the job early.
     if kept == 0:
-        raise RuntimeError("Silver rỗng sau khi làm sạch — kiểm tra bronze/luật DQ.")
+        raise RuntimeError("Silver is empty after cleaning — check bronze/DQ rules.")
 
     (
         clean.writeTo(TABLE)

@@ -1,17 +1,17 @@
-# DataHub v0.12.1 — ánh xạ từ quickstart chính thức (vốn dùng MySQL) sang hạ tầng sẵn có của repo:
-#   - DB: Postgres (database 'datahub' đã được postgres-setup ở infra.yml tạo) thay cho MySQL
-#   - Kafka broker: service 'kafka' (advertised kafka:29092) thay cho 'broker'
-#   - Topics DataHub: đã được 'kafka-setup' ở infra.yml tạo sẵn
-#   - Graph store: Elasticsearch (GRAPH_SERVICE_IMPL=elasticsearch) — repo không có Neo4j
-# Pin chặt v0.12.1 cho khớp acryl-datahub[airflow]==0.12.1.5 trong airflow/requirements.txt.
-# Env var lấy nguyên văn từ docker/quickstart/docker-compose-without-neo4j.quickstart.yml và
-# docker/datahub-gms/env/docker.postgres.env của tag v0.12.1.
+# DataHub v0.12.1 — mapped from the official quickstart (which uses MySQL) onto this repo's existing infra:
+#   - DB: Postgres (database 'datahub' created by postgres-setup in infra.yml) instead of MySQL
+#   - Kafka broker: service 'kafka' (advertised kafka:29092) instead of 'broker'
+#   - DataHub topics: pre-created by 'kafka-setup' in infra.yml
+#   - Graph store: Elasticsearch (GRAPH_SERVICE_IMPL=elasticsearch) — the repo has no Neo4j
+# Pinned to v0.12.1 to match acryl-datahub[airflow]==0.12.1.5 in airflow/requirements.txt.
+# Env vars taken verbatim from docker/quickstart/docker-compose-without-neo4j.quickstart.yml and
+# docker/datahub-gms/env/docker.postgres.env at tag v0.12.1.
 
 services:
-  # --- Confluent Schema Registry (quickstart yêu cầu; infra.yml chưa có) ---
-  # Đặt tên 'schema-registry' để khớp URL http://schema-registry:8081 mà GMS/upgrade/actions dùng.
-  # Dùng CP 7.6.0 cho đồng bộ với kafka/zookeeper 7.6.0 ở infra.yml. Không publish host port
-  # (8081 đã bị spark-worker UI chiếm) — chỉ truy cập nội bộ trong network là đủ.
+  # --- Confluent Schema Registry (required by the quickstart; infra.yml doesn't ship it) ---
+  # Named 'schema-registry' to match the URL http://schema-registry:8081 used by GMS/upgrade/actions.
+  # CP 7.6.0 to stay in sync with kafka/zookeeper 7.6.0 in infra.yml. No host port published
+  # (8081 is taken by the spark-worker UI) — in-network access only is enough.
   schema-registry:
     image: confluentinc/cp-schema-registry:7.6.0
     container_name: schema-registry
@@ -31,7 +31,7 @@ services:
       retries: 5
       start_period: 20s
 
-  # --- ES setup: tạo index template/policy cho DataHub ---
+  # --- ES setup: create index templates/policies for DataHub ---
   datahub-elasticsearch-setup:
     image: linkedin/datahub-elasticsearch-setup:v0.12.1
     container_name: datahub-elasticsearch-setup
@@ -46,14 +46,14 @@ services:
       USE_AWS_ELASTICSEARCH: "false"
     networks: [lakehouse]
 
-  # --- Postgres setup: tạo bảng metadata_aspect_v2 + seed user mặc định trong DB 'datahub' ---
-  # DB 'datahub' đã được postgres-setup (infra.yml) tạo; init.sh của image này kiểm tra tồn tại
-  # trước khi CREATE nên sẽ bỏ qua bước tạo DB, chỉ chạy init.sql tạo bảng.
+  # --- Postgres setup: create table metadata_aspect_v2 + seed the default user in DB 'datahub' ---
+  # DB 'datahub' is created by postgres-setup (infra.yml); this image's init.sh checks existence
+  # before CREATE, so it skips creating the DB and only runs init.sql to create tables.
   datahub-postgres-setup:
     image: acryldata/datahub-postgres-setup:v0.12.1
     container_name: datahub-postgres-setup
     depends_on:
-      # phụ thuộc postgres-setup ở infra.yml để chắc chắn DB 'datahub' và role đã tồn tại
+      # depends on postgres-setup in infra.yml so DB 'datahub' and its role already exist
       postgres-setup:
         condition: service_completed_successfully
     environment:
@@ -64,7 +64,7 @@ services:
       DATAHUB_DB_NAME: ${POSTGRES_DB_DATAHUB}
     networks: [lakehouse]
 
-  # --- System Update job: dựng/migrate schema index trước khi GMS chạy ---
+  # --- System Update job: build/migrate index schemas before GMS starts ---
   datahub-upgrade:
     image: acryldata/datahub-upgrade:v0.12.1
     container_name: datahub-upgrade
@@ -76,7 +76,7 @@ services:
         condition: service_completed_successfully
       schema-registry:
         condition: service_healthy
-      # topics DataHub do kafka-setup (infra.yml) tạo
+      # DataHub topics are created by kafka-setup (infra.yml)
       kafka-setup:
         condition: service_completed_successfully
     environment:
@@ -100,7 +100,7 @@ services:
       REPROCESS_DEFAULT_BROWSE_PATHS_V2: "false"
     networks: [lakehouse]
 
-  # --- GMS: backend metadata (chứa luôn MAE/MCE/PE consumer embedded) ---
+  # --- GMS: metadata backend (MAE/MCE/PE consumers embedded) ---
   datahub-gms:
     image: linkedin/datahub-gms:v0.12.1
     container_name: datahub-gms
@@ -109,7 +109,7 @@ services:
       datahub-upgrade:
         condition: service_completed_successfully
     ports:
-      - "8083:8080"      # GMS API (8083 host — 8080 đã bị Trino chiếm)
+      - "8083:8080"      # GMS API (8083 on host — 8080 is taken by Trino)
     environment:
       DATAHUB_SERVER_TYPE: quickstart
       DATAHUB_TELEMETRY_ENABLED: "true"
@@ -167,9 +167,9 @@ services:
     networks: [lakehouse]
 
   # --- Actions: ingestion/automation framework ---
-  # acryldata/datahub-actions có lịch sử version RIÊNG, không trùng v0.12.1. Pin v0.0.14: đây là
-  # bản actions đang hành dụng khi DataHub 0.12.1 phát hành (actions v0.0.14 ra 2023-10-28,
-  # DataHub 0.12.1 ra 2023-12-08; bản kế tiếp v0.0.15 mãi 2024-02 mới có).
+  # acryldata/datahub-actions has its OWN version line, not v0.12.1. Pinned to v0.0.14: the
+  # actions release current when DataHub 0.12.1 shipped (actions v0.0.14 released 2023-10-28,
+  # DataHub 0.12.1 on 2023-12-08; the next one, v0.0.15, only arrived in 2024-02).
   datahub-actions:
     image: acryldata/datahub-actions:v0.0.14
     container_name: datahub-actions

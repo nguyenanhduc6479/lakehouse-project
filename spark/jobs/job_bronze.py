@@ -1,16 +1,16 @@
-"""BRONZE: nạp parquet thô ở landing -> bảng Iceberg lakehouse.bronze.stock_ohlcv.
+"""BRONZE: load raw landing parquet -> Iceberg table lakehouse.bronze.stock_ohlcv.
 
-Bronze = bản sao "gần như thô" của nguồn, chỉ chuẩn hoá tối thiểu:
-- ép `time` -> `trade_date` kiểu date (khoá tự nhiên theo ngày giao dịch),
-- khử trùng lặp theo (symbol, trade_date), giữ bản có `ingested_at` mới nhất
-  (vì mỗi lần ingest kéo lại cả khoảng ngày -> các lần chạy khác ngày sẽ chồng nhau).
+Bronze = a "nearly raw" copy of the source, with only minimal normalization:
+- cast `time` -> `trade_date` as date (natural key by trading day),
+- deduplicate by (symbol, trade_date), keeping the row with the latest `ingested_at`
+  (each ingest re-pulls a whole date range -> runs on different days overlap).
 
-Idempotent: dùng createOrReplace() ghi đè toàn bộ bảng từ union landing đã dedupe.
-Dataset demo nhỏ nên full-rebuild là đủ và đơn giản nhất; muốn incremental thì đổi
-sang MERGE INTO theo (symbol, trade_date).
+Idempotent: createOrReplace() overwrites the whole table from the deduped landing union.
+The demo dataset is small, so a full rebuild is enough and simplest; for incremental,
+switch to MERGE INTO on (symbol, trade_date).
 
-Logic đặt trong `transform_bronze()` (hàm thuần, chỉ nhận/trả DataFrame) để unit-test
-được mà không cần MinIO/Polaris; `main()` lo phần I/O.
+Logic lives in `transform_bronze()` (a pure function, DataFrame in/out) so it can be
+unit-tested without MinIO/Polaris; `main()` handles the I/O.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ from pyspark.sql.types import (
 logger = logging.getLogger(__name__)
 TABLE = f"{CATALOG}.bronze.stock_ohlcv"
 
-# Schema tường minh của parquet landing (do ingest_ohlcv.py sinh ra). Khai báo rõ để
-# Spark không phải suy luận kiểu — tránh lệch kiểu giữa các lần chạy / file khác nhau.
+# Explicit schema of the landing parquet (produced by ingest_ohlcv.py). Declared so
+# Spark doesn't infer types — avoids type drift between runs / files.
 LANDING_SCHEMA = StructType(
     [
         StructField("time", TimestampType(), True),
@@ -50,9 +50,9 @@ LANDING_SCHEMA = StructType(
 
 
 def transform_bronze(raw: DataFrame) -> DataFrame:
-    """Chuẩn hoá tối thiểu + khử trùng lặp, giữ bản mới nhất theo `ingested_at`.
+    """Minimal normalization + dedup, keeping the latest row by `ingested_at`.
 
-    Hàm thuần: không đọc/ghi I/O, nên test được bằng DataFrame dựng tay.
+    Pure function: no I/O, so it can be tested with hand-built DataFrames.
     """
     dedup = Window.partitionBy("symbol", "trade_date").orderBy(F.col("ingested_at").desc())
     return (
@@ -74,14 +74,14 @@ def transform_bronze(raw: DataFrame) -> DataFrame:
 
 
 def read_landing(spark: SparkSession) -> DataFrame:
-    """Đọc toàn bộ parquet landing với schema tường minh."""
+    """Read all landing parquet with the explicit schema."""
     return spark.read.schema(LANDING_SCHEMA).parquet(landing_s3a_uri())
 
 
 def main() -> None:
     spark = get_spark("job_bronze")
     raw = read_landing(spark)
-    logger.warning("Landing đọc được %d dòng thô.", raw.count())
+    logger.warning("Landing: read %d raw rows.", raw.count())
 
     bronze = transform_bronze(raw)
 
@@ -92,7 +92,7 @@ def main() -> None:
         .partitionedBy("symbol")
         .createOrReplace()
     )
-    logger.warning("Ghi %s xong: %d dòng.", TABLE, bronze.count())
+    logger.warning("Wrote %s: %d rows.", TABLE, bronze.count())
     spark.stop()
 
 

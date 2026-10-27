@@ -1,16 +1,16 @@
-"""GOLD: từ silver tính chỉ số phân tích -> lakehouse.gold.stock_daily_metrics.
+"""GOLD: compute analytics metrics from silver -> lakehouse.gold.stock_daily_metrics.
 
-Tầng phục vụ truy vấn/BI (query bằng Trino). Mỗi dòng = 1 mã 1 ngày kèm:
-- prev_close: giá đóng cửa phiên trước (lag theo thời gian trong cùng mã),
-- daily_return: lợi suất ngày = close/prev_close - 1,
-- ma5 / ma20: trung bình động 5 và 20 phiên của close,
-- range_pct: biên độ ngày = (high - low)/close.
+The serving layer for queries/BI (queried with Trino). Each row = 1 symbol on 1 day with:
+- prev_close: previous session's close (lag over time within the same symbol),
+- daily_return: daily return = close/prev_close - 1,
+- ma5 / ma20: 5- and 20-session moving averages of close,
+- range_pct: daily range = (high - low)/close.
 
-WHY window partitionBy(symbol) orderBy(trade_date): mọi chỉ số theo chuỗi thời gian
-TRONG TỪNG MÃ, không trộn giữa các mã. ma5/ma20 dùng rowsBetween theo số phiên.
+WHY window partitionBy(symbol) orderBy(trade_date): every metric is a time series
+WITHIN EACH SYMBOL, never mixed across symbols. ma5/ma20 use rowsBetween by session count.
 
-Logic đặt trong `build_gold()` (hàm thuần) để unit-test; `main()` lo I/O.
-Idempotent bằng createOrReplace() (bảng nhỏ, rebuild toàn bộ là đủ).
+Logic lives in `build_gold()` (a pure function) for unit tests; `main()` handles I/O.
+Idempotent via createOrReplace() (small table, a full rebuild is enough).
 """
 
 from __future__ import annotations
@@ -39,10 +39,10 @@ GOLD_COLUMNS = [
 
 
 def build_gold(silver: DataFrame) -> DataFrame:
-    """Tính chỉ số ngày theo từng mã. Hàm thuần (cần cột high/low/close/volume)."""
+    """Compute daily metrics per symbol. Pure function (needs high/low/close/volume columns)."""
     w = Window.partitionBy("symbol").orderBy("trade_date")
-    w5 = w.rowsBetween(-4, 0)  # 5 phiên gồm phiên hiện tại
-    w20 = w.rowsBetween(-19, 0)  # 20 phiên
+    w5 = w.rowsBetween(-4, 0)  # 5 sessions including the current one
+    w20 = w.rowsBetween(-19, 0)  # 20 sessions
 
     return (
         silver.withColumn("prev_close", F.lag("close").over(w))
@@ -68,8 +68,8 @@ def main() -> None:
 
     rows = gold.count()
     if rows == 0:
-        raise RuntimeError("Gold rỗng — silver không có dữ liệu.")
-    logger.warning("Gold: %d dòng chỉ số.", rows)
+        raise RuntimeError("Gold is empty — silver has no data.")
+    logger.warning("Gold: %d metric rows.", rows)
 
     (
         gold.writeTo(TABLE)

@@ -164,10 +164,10 @@ the transform/analytics niceties.
 2. **Run the pipeline.** Two ways, same jobs:
    - **By hand** (fastest to debug): ingest, then submit each Spark job in-container —
      ```bash
-     # ingest: cần venv có vnstock + boto3 + pyarrow (hiện vnstock không cài được — xem bước 1)
+     # ingest: needs a venv with vnstock + boto3 + pyarrow (vnstock is currently uninstallable — see step 1)
      PYTHONUTF8=1 python airflow/plugins/ingest_ohlcv.py --symbols FPT,VNM,ACB \
-       --endpoint-url http://localhost:9000   # access/secret lấy từ env MINIO_*
-     # spark-submit KHÔNG nằm trên PATH trong container -> dùng đường dẫn đầy đủ
+       --endpoint-url http://localhost:9000   # access/secret taken from env MINIO_*
+     # spark-submit is NOT on the PATH in the container -> use the full path
      docker compose exec spark-master /opt/spark/bin/spark-submit --py-files /opt/spark/jobs/common.py /opt/spark/jobs/job_bronze.py
      docker compose exec spark-master /opt/spark/bin/spark-submit --py-files /opt/spark/jobs/common.py /opt/spark/jobs/job_silver.py
      docker compose exec spark-master /opt/spark/bin/spark-submit --py-files /opt/spark/jobs/common.py /opt/spark/jobs/job_gold.py
@@ -229,10 +229,10 @@ it also tries `custom-*` (local-only) and `minio/minio`, which Docker Hub now re
 Python tooling (pipeline code — `pyproject.toml` at root, `uv` + `ruff` + `pytest`):
 
 ```bash
-# venv/ (WSL, Python 3.11): deps nằm trong dependency-group `dev`, KHÔNG có requirements.txt ở root
+# venv/ (WSL, Python 3.11): deps live in dependency-group `dev`, there is NO requirements.txt at the root
 uv pip install --python venv/bin/python --group dev
 venv/bin/ruff format . && venv/bin/ruff check --fix .   # format + lint
-venv/bin/python -m pytest -m "not spark"                 # unit tests trên host (ingest, mock)
+venv/bin/python -m pytest -m "not spark"                 # unit tests on the host (ingest, mocked)
 ```
 
 Spark transform tests need a JVM (WSL has none) — run them in `spark-master`. The container has
@@ -246,7 +246,7 @@ docker exec -e PYTHONPATH=/tmp/pylib:/opt/spark/jobs:/opt/spark/python/lib/pyspa
   spark-master python3 -m pytest -q -p no:cacheprovider /tmp/tests/test_bronze.py /tmp/tests/test_silver.py /tmp/tests/test_gold.py
 ```
 
-Tests live in `tests/` (fixtures in `conftest.py`); `@pytest.mark.spark` = cần JVM. Pure-Python
+Tests live in `tests/` (fixtures in `conftest.py`); `@pytest.mark.spark` = needs a JVM. Pure-Python
 ingest tests mock `vnstock` + `boto3` and pass on the host; the Spark transform tests
 (`transform_bronze` / `clean_silver` / `build_gold`) run in the spark container.
 
@@ -276,7 +276,8 @@ verified with `docker ps`): Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200
 - **Healthcheck-gated startup**: most `depends_on` use `condition: service_healthy` or
   `service_completed_successfully` rather than plain ordering — preserve this so the dependency
   chain (postgres → postgres-setup → polaris/airflow-init → real services) doesn't race.
-- Shell scripts and `.env` comments are written in **Vietnamese** — match that when editing them.
+- Everything in the repo — code comments, docstrings, log/error messages, shell scripts, `.env`
+  comments and docs — is written in **English**; keep it that way when editing.
 - Timezone is pinned to `Asia/Ho_Chi_Minh` (`TZ`) across every service.
 - Each `compose/*.yml` re-declares the `lakehouse` network (and its own `volumes:`) so the file
   stays independently mergeable — keep that when adding modules.

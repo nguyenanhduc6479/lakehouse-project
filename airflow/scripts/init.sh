@@ -16,7 +16,7 @@ echo "admin ensured"
 
 # --- spark_rest_conn (Spark Standalone REST API, cluster mode) ---
 # Airflow submit job qua HTTP → Spark Master port 6066
-# Driver chạy trên Spark Worker, không chạy trên Airflow
+# The driver runs on the Spark Worker, not on Airflow
 : "${SPARK_REST_HOST:?Missing SPARK_REST_HOST}"
 : "${SPARK_REST_PORT:?Missing SPARK_REST_PORT}"
 

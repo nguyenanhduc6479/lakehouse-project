@@ -1,6 +1,6 @@
 services:
-  # chạy một lần trước khi spark-thrift start để fix ownership của spark_events_vol
-  # (named volume mới tạo có owner root, spark user UID 185 cần write access)
+  # runs once before spark-thrift starts to fix ownership of spark_events_vol
+  # (a freshly created named volume is owned by root; the spark user UID 185 needs write access)
   spark-fix-permissions:
     image: busybox
     container_name: spark-fix-permissions
@@ -19,7 +19,7 @@ services:
     environment:
       SPARK_MASTER_HOST: spark-master
       SPARK_MASTER_OPTS: "-Dspark.master.rest.enabled=true -Dspark.master.rest.port=6066"
-      # config cho job đọc trong common.py (Polaris REST catalog + MinIO) — lấy từ .env
+      # config read by jobs in common.py (Polaris REST catalog + MinIO) — from .env
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -28,7 +28,7 @@ services:
       POLARIS_URI: http://polaris:8181/api/catalog
     ports:
       - "7077:7077"      # master RPC
-      - "8090:8080"      # master web UI (8090 host, tránh đụng Trino 8080)
+      - "8090:8080"      # master web UI (8090 on host, avoids clashing with Trino 8080)
       - "6066:6066"      # REST API cho cluster mode submit
     volumes:
       - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
@@ -45,7 +45,7 @@ services:
   spark-worker:
     image: custom-spark:3.5.1
     container_name: spark-worker
-    # driver chạy trên worker (cluster mode) nên cần env Polaris/MinIO cho common.py
+    # the driver runs on the worker (cluster mode), so it needs Polaris/MinIO env for common.py
     environment:
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -90,9 +90,9 @@ services:
       - "--hiveconf"
       - "hive.server2.thrift.bind.host=0.0.0.0"
     environment:
-      SPARK_NO_DAEMONIZE: "true"    # chạy foreground để container không exit
-      # để sẵn cho giai đoạn dbt sau (thrift còn cần catalog config trong
-      # spark-defaults.conf mới dùng được Iceberg — chưa làm ở pipeline này)
+      SPARK_NO_DAEMONIZE: "true"    # run in the foreground so the container doesn't exit
+      # prepared for the later dbt phase (thrift still needs the catalog config in
+      # spark-defaults.conf before it can use Iceberg — not done in this pipeline)
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -106,7 +106,7 @@ services:
         condition: service_completed_successfully
     ports:
       - "10000:10000"    # JDBC cho dbt-spark
-      - "4040:4040"      # Spark UI của thrift app
+      - "4040:4040"      # Spark UI of the thrift app
     volumes:
       - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
       - spark_events_vol:/opt/spark/eventlogs

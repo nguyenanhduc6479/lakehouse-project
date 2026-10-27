@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "Pipeline medallion OHLCV (ingest -> bronze -> silver -> gold) cho lakehouse local"
 requires-python = ">=3.11"
 
-# Dev deps quản bằng uv (uv sync --group dev / uv run pytest).
-# pyspark PIN 3.5.1 để khớp cluster custom-spark:3.5.1 — test logic transform phải chạy
-# trên đúng phiên bản Spark với production.
+# Dev deps managed by uv (uv sync --group dev / uv run pytest).
+# pyspark PINNED to 3.5.1 to match the custom-spark:3.5.1 cluster — transform logic tests must run
+# on the same Spark version as production.
 [dependency-groups]
 dev = [
     "pyspark==3.5.1",
@@ -19,15 +19,15 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# Cho pytest import trực tiếp các module job (spark/jobs) và ingest (airflow/plugins)
-# mà không cần cài thành package.
+# Let pytest import the job modules (spark/jobs) and ingest (airflow/plugins) directly
+# without installing them as a package.
 pythonpath = ["spark/jobs", "airflow/plugins"]
 testpaths = ["tests"]
-# Marker 'spark' = test cần SparkSession/JVM. Trên host Windows (python worker hay bị
-# "Accept timed out") chạy phần còn lại bằng:  uv run pytest -m "not spark"
-# Test Spark chạy trong container Linux:
+# Marker 'spark' = test needs a SparkSession/JVM. On a Windows host (python workers often hit
+# "Accept timed out") run the rest with:  uv run pytest -m "not spark"
+# Spark tests run in the Linux container:
 #   docker compose exec spark-master bash -c "cd /opt/spark/jobs && python -m pytest ..."
-markers = ["spark: test cần SparkSession/JVM (chạy trong container Linux)"]
+markers = ["spark: test needs a SparkSession/JVM (runs in the Linux container)"]
 
 [tool.ruff]
 line-length = 100

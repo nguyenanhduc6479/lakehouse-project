@@ -1,12 +1,12 @@
 services:
   trino:
-    # >= 454: bản đầu tiên có iceberg.rest-catalog.oauth2.scope — Polaris bắt buộc
-    # scope PRINCIPAL_ROLE:ALL, 435 không set được nên bị invalid_scope.
+    # >= 454: first release with iceberg.rest-catalog.oauth2.scope — Polaris requires
+    # scope PRINCIPAL_ROLE:ALL; 435 can't set it, so it fails with invalid_scope.
     image: trinodb/trino:454
     container_name: trino
     environment:
       POLARIS_SECRET: ${POLARIS_SECRET}
-      # trino/catalog/lakehouse.properties đọc qua ${ENV:...} để truy cập data file trên MinIO
+      # read by trino/catalog/lakehouse.properties via ${ENV:...} to access data files on MinIO
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}

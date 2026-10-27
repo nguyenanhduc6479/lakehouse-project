@@ -1,9 +1,9 @@
-# dbt-spark dùng PyHive kết nối Spark Thrift Server qua Python thuần, không cần Java
+# dbt-spark uses PyHive to reach the Spark Thrift Server in pure Python, no Java needed
 dbt-core==1.8.0
 dbt-spark[PyHive]==1.8.0
 
 # airflow providers
-apache-airflow-providers-http==4.11.1          # gọi Spark REST API (cluster mode)
+apache-airflow-providers-http==4.11.1          # calls the Spark REST API (cluster mode)
 apache-airflow-providers-amazon==8.24.0        # MinIO / S3
 apache-airflow-providers-postgres==5.11.1      # PostgreSQL
 apache-airflow-providers-trino==5.7.1          # Trino ad-hoc queries
@@ -11,13 +11,13 @@ apache-airflow-providers-trino==5.7.1          # Trino ad-hoc queries
 # datahub ingestion recipes
 acryl-datahub[airflow]==0.12.1.5
 
-# ingest OHLCV (task ingest trong DAG lakehouse_ohlcv).
-# TẠM GỠ vnstock: PyPI hiện không còn file nào cho package `vnstock` (simple index
-# rỗng, JSON API 404 — kiểm tra 2026-10-27) nên `vnstock==4.0.4` làm build image fail.
-# ingest_ohlcv.py import vnstock lazy (trong hàm) nên DAG vẫn parse được; chỉ task
-# ingest_landing lỗi lúc chạy cho tới khi có nguồn vnstock thay thế (đang thử vnstock3).
+# ingest OHLCV (the ingest task in DAG lakehouse_ohlcv).
+# vnstock TEMPORARILY REMOVED: PyPI currently has no files for the `vnstock` package (empty
+# simple index, JSON API 404 — checked 2026-10-27), so `vnstock==4.0.4` breaks the image build.
+# ingest_ohlcv.py imports vnstock lazily (inside a function) so the DAG still parses; only the
+# ingest_landing task fails at run time until a replacement source exists (trying vnstock3).
 # vnstock==4.0.4
-# pandas/pyarrow để ghi parquet lên MinIO qua boto3 (đã có sẵn từ provider amazon).
-# pyarrow phải khớp constraints-2.9.2 (pin 14.0.2), lệch là pip ResolutionImpossible.
+# pandas/pyarrow to write parquet to MinIO via boto3 (already provided by the amazon provider).
+# pyarrow must match constraints-2.9.2 (pinned 14.0.2); any mismatch -> pip ResolutionImpossible.
 pandas==2.1.4
 pyarrow==14.0.2

@@ -1,12 +1,12 @@
-"""Fixtures dùng chung cho test pipeline.
+"""Shared fixtures for the pipeline tests.
 
-`spark`: SparkSession local[1] scope=session — nhẹ, không cần MinIO/Polaris/Iceberg vì
-các test chỉ kiểm tra LOGIC transform thuần (clean_silver, build_gold, transform_bronze)
-trên DataFrame dựng tay trong bộ nhớ.
+`spark`: SparkSession local[1] scope=session — lightweight, no MinIO/Polaris/Iceberg needed
+since the tests only check pure transform LOGIC (clean_silver, build_gold, transform_bronze)
+on hand-built in-memory DataFrames.
 
-Chạy test cần pyspark==3.5.1 + Java (JDK 8/11/17). Cách gọn nhất: chạy trong container
-custom-spark (`docker compose exec spark-master python -m pytest /opt/...`) hoặc máy có
-sẵn Java. `pythonpath` tới spark/jobs & airflow/plugins khai trong pyproject.toml.
+Running the tests needs pyspark==3.5.1 + Java (JDK 8/11/17). Simplest: run inside the
+custom-spark container (`docker compose exec spark-master python -m pytest /opt/...`) or on
+a machine with Java. The `pythonpath` to spark/jobs & airflow/plugins is set in pyproject.toml.
 """
 
 from __future__ import annotations
