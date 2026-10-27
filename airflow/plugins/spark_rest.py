@@ -8,6 +8,7 @@ khó tính; giữ nguyên các field bắt buộc bên dưới.
 Lưu ý: appResource/pyFiles là đường dẫn file:// NẰM TRÊN WORKER (thư mục
 /opt/spark/jobs đã mount vào cả master lẫn worker qua compose/spark.yml).
 """
+
 from __future__ import annotations
 
 import logging

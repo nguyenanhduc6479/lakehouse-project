@@ -7,16 +7,17 @@ Chuỗi tuyến tính 4 bước, chạy đúng trên stack sẵn có:
 Config MinIO đọc từ env của container Airflow (inject qua compose/airflow.yml từ .env),
 KHÔNG hardcode secret trong DAG.
 """
+
 from __future__ import annotations
 
 import os
 from datetime import datetime
 
-from airflow import DAG
 from airflow.operators.python import PythonOperator
-
 from ingest_ohlcv import DEFAULT_SYMBOLS, run_ingest
 from spark_rest import submit_and_wait
+
+from airflow import DAG
 
 
 def _ingest_callable(**_):

@@ -11,12 +11,13 @@ land parquet; các job Spark sau đó chỉ việc đọc parquet -> Iceberg. Gi
 WHY dùng boto3 (không s3fs): Airflow đã có boto3 qua provider amazon, thêm s3fs dễ đụng
 phiên bản aiobotocore. Ghi parquet ra buffer bằng pyarrow rồi put_object thẳng lên MinIO.
 """
+
 from __future__ import annotations
 
 import argparse
 import io
 import logging
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def run_ingest(
     symbols = symbols or DEFAULT_SYMBOLS
     end = end or date.today().isoformat()
     ingest_date = ingest_date or date.today().isoformat()
-    ingested_at = datetime.now(timezone.utc)
+    ingested_at = datetime.now(UTC)
 
     frames = []
     for sym in symbols:
@@ -110,10 +111,14 @@ def _main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(description="Ingest OHLCV vnstock -> parquet landing trên MinIO")
-    p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="DS mã, phân tách bằng dấu phẩy")
+    p.add_argument(
+        "--symbols", default=",".join(DEFAULT_SYMBOLS), help="DS mã, phân tách bằng dấu phẩy"
+    )
     p.add_argument("--start", default="2024-01-01")
     p.add_argument("--end", default=None)
-    p.add_argument("--endpoint-url", default=os.environ.get("MINIO_ENDPOINT", "http://localhost:9000"))
+    p.add_argument(
+        "--endpoint-url", default=os.environ.get("MINIO_ENDPOINT", "http://localhost:9000")
+    )
     p.add_argument("--access-key", default=os.environ.get("MINIO_ROOT_USER"))
     p.add_argument("--secret-key", default=os.environ.get("MINIO_ROOT_PASSWORD"))
     p.add_argument("--bucket", default=os.environ.get("MINIO_BUCKET", "lakehouse"))

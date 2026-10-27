@@ -111,10 +111,16 @@ prefixes under `s3://lakehouse/` and as Polaris namespaces.
   parquet landing), `airflow/plugins/spark_rest.py` (submit to Spark REST 6066); and the DAG
   `airflow/dags/lakehouse_ohlcv_dag.py` (dag_id `lakehouse_ohlcv`). The jobs configure the
   Polaris/Iceberg catalog themselves in
-  `common.py` (because `spark-defaults.conf` doesn't). Still **empty/not-written:** dbt models and
-  `dbt/dbt_project.yml` (empty, so dbt cannot run as-is).
+  `common.py` (because `spark-defaults.conf` doesn't). Transform logic is factored into pure
+  functions (`transform_bronze` / `clean_silver` / `build_gold`) with `pytest` tests under `tests/`
+  (ingest tests mock vnstock+boto3 and pass on the host; Spark tests run in the container). Still
+  **empty/not-written:** dbt models and `dbt/dbt_project.yml` (empty, so dbt cannot run as-is).
 - **`.scratch_vnstock/`** is a throwaway `uv` venv used to verify the `vnstock` API; it is not part
   of the stack and can be deleted anytime.
+- **Under git now** (was not before). Remote `lakehouse` →
+  `https://github.com/nguyenanhduc6479/lakehouse-project.git`; branches `main` and `dev` both track
+  it (`dev` is the working branch). An older remote `origin` → `my-project.git` also exists. `.env`
+  and `.claude/settings.local.json` are gitignored, so secrets are never pushed — keep it that way.
 
 ## Next steps
 
@@ -173,7 +179,19 @@ docker compose logs -f <service> # tail logs for one service
 docker compose down              # stop and remove containers (named volumes persist)
 ```
 
-There are no lint/test/format commands (no Python source, no Makefile, no pyproject/pytest config).
+Python tooling (pipeline code — `pyproject.toml` at root, `uv` + `ruff` + `pytest`):
+
+```bash
+uv run ruff format . && uv run ruff check --fix .   # format + lint
+uv run pytest -m "not spark"                         # unit tests chạy trên host (ingest, mock)
+# test transform cần SparkSession/JVM — python worker hay "Accept timed out" trên host Windows,
+# nên chạy trong container Linux:
+docker compose exec spark-master bash -c "cd /opt/spark/jobs && python -m pytest"
+```
+
+Tests live in `tests/` (fixtures in `conftest.py`); `@pytest.mark.spark` = cần JVM. Pure-Python
+ingest tests mock `vnstock` + `boto3` and pass on the host; the Spark transform tests
+(`transform_bronze` / `clean_silver` / `build_gold`) run in the spark container.
 
 ### Key ports (host)
 

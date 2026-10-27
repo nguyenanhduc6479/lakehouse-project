@@ -8,31 +8,56 @@ Bronze = bản sao "gần như thô" của nguồn, chỉ chuẩn hoá tối thi
 Idempotent: dùng createOrReplace() ghi đè toàn bộ bảng từ union landing đã dedupe.
 Dataset demo nhỏ nên full-rebuild là đủ và đơn giản nhất; muốn incremental thì đổi
 sang MERGE INTO theo (symbol, trade_date).
+
+Logic đặt trong `transform_bronze()` (hàm thuần, chỉ nhận/trả DataFrame) để unit-test
+được mà không cần MinIO/Polaris; `main()` lo phần I/O.
 """
+
 from __future__ import annotations
 
 import logging
 
-from pyspark.sql import Window
-from pyspark.sql import functions as F
-
 from common import CATALOG, get_spark, landing_s3a_uri
+from pyspark.sql import DataFrame, SparkSession, Window
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    DoubleType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 
 logger = logging.getLogger(__name__)
 TABLE = f"{CATALOG}.bronze.stock_ohlcv"
 
+# Schema tường minh của parquet landing (do ingest_ohlcv.py sinh ra). Khai báo rõ để
+# Spark không phải suy luận kiểu — tránh lệch kiểu giữa các lần chạy / file khác nhau.
+LANDING_SCHEMA = StructType(
+    [
+        StructField("time", TimestampType(), True),
+        StructField("open", DoubleType(), True),
+        StructField("high", DoubleType(), True),
+        StructField("low", DoubleType(), True),
+        StructField("close", DoubleType(), True),
+        StructField("volume", LongType(), True),
+        StructField("symbol", StringType(), False),
+        StructField("source", StringType(), True),
+        StructField("ingested_at", TimestampType(), True),
+    ]
+)
 
-def main() -> None:
-    spark = get_spark("job_bronze")
 
-    raw = spark.read.parquet(landing_s3a_uri())
-    logger.warning("Landing đọc được %d dòng thô.", raw.count())
+def transform_bronze(raw: DataFrame) -> DataFrame:
+    """Chuẩn hoá tối thiểu + khử trùng lặp, giữ bản mới nhất theo `ingested_at`.
 
-    # Chuẩn hoá tối thiểu + khử trùng lặp giữ bản mới nhất theo ingested_at.
-    w = Window.partitionBy("symbol", "trade_date").orderBy(F.col("ingested_at").desc())
-    bronze = (
+    Hàm thuần: không đọc/ghi I/O, nên test được bằng DataFrame dựng tay.
+    """
+    dedup = Window.partitionBy("symbol", "trade_date").orderBy(F.col("ingested_at").desc())
+    return (
         raw.withColumn("trade_date", F.to_date("time"))
-        .withColumn("_rn", F.row_number().over(w))
+        .withColumn("_rn", F.row_number().over(dedup))
         .where(F.col("_rn") == 1)
         .select(
             "symbol",
@@ -46,6 +71,19 @@ def main() -> None:
             "ingested_at",
         )
     )
+
+
+def read_landing(spark: SparkSession) -> DataFrame:
+    """Đọc toàn bộ parquet landing với schema tường minh."""
+    return spark.read.schema(LANDING_SCHEMA).parquet(landing_s3a_uri())
+
+
+def main() -> None:
+    spark = get_spark("job_bronze")
+    raw = read_landing(spark)
+    logger.warning("Landing đọc được %d dòng thô.", raw.count())
+
+    bronze = transform_bronze(raw)
 
     (
         bronze.writeTo(TABLE)
