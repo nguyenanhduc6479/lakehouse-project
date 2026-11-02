@@ -20,9 +20,6 @@ RUN curl -L -o /opt/spark/jars/hadoop-aws-3.3.4.jar https://repo1.maven.org/mave
  && curl -L -o /opt/spark/jars/iceberg-aws-bundle-1.5.2.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.5.2/iceberg-aws-bundle-1.5.2.jar \
 # --- postgres ---
  && curl -L -o /opt/spark/jars/postgresql-42.6.0.jar https://repo1.maven.org/maven2/org/postgresql/postgresql/42.6.0/postgresql-42.6.0.jar \
-# --- datahub spark lineage (fat jar already bundles datahub-client, no separate download) ---
- && curl -L -o /opt/spark/jars/acryl-spark-lineage_2.12-0.2.18.jar https://repo1.maven.org/maven2/io/acryl/acryl-spark-lineage_2.12/0.2.18/acryl-spark-lineage_2.12-0.2.18.jar \
- && zip -q -d /opt/spark/jars/acryl-spark-lineage_2.12-0.2.18.jar "org/antlr/*" \
 # --- kafka client (matches Confluent CP 7.6) ---
  && curl -L -o /opt/spark/jars/kafka-clients-3.6.0.jar https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.6.0/kafka-clients-3.6.0.jar \
  && chmod 644 /opt/spark/jars/*.jar

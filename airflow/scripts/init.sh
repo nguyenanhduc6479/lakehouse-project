@@ -15,7 +15,7 @@ airflow users create \
 echo "admin ensured"
 
 # --- spark_rest_conn (Spark Standalone REST API, cluster mode) ---
-# Airflow submit job qua HTTP → Spark Master port 6066
+# Airflow submits jobs over HTTP to Spark Master port 6066
 # The driver runs on the Spark Worker, not on Airflow
 : "${SPARK_REST_HOST:?Missing SPARK_REST_HOST}"
 : "${SPARK_REST_PORT:?Missing SPARK_REST_PORT}"
@@ -75,17 +75,5 @@ airflow connections add trino_conn \
   --conn-schema "lakehouse"
 airflow connections get trino_conn
 echo "trino_conn done."
-
-# --- datahub_conn ---
-: "${DATAHUB_GMS_HOST:?Missing DATAHUB_GMS_HOST}"
-: "${DATAHUB_GMS_PORT:?Missing DATAHUB_GMS_PORT}"
-
-airflow connections delete datahub_conn 2>/dev/null || true
-airflow connections add datahub_conn \
-  --conn-type http \
-  --conn-host "$DATAHUB_GMS_HOST" \
-  --conn-port "$DATAHUB_GMS_PORT"
-airflow connections get datahub_conn
-echo "datahub_conn done."
 
 echo "Init done."

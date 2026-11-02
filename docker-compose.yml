@@ -1,8 +1,8 @@
 include:
   - compose/infra.yml
+  - compose/source.yml
   - compose/storage.yml
   - compose/catalog.yml
-  - compose/datahub.yml
   - compose/spark.yml
   - compose/trino.yml
   - compose/airflow.yml

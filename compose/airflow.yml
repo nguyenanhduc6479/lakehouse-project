@@ -12,7 +12,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     TZ: Asia/Ho_Chi_Minh
-    # MinIO for the ingest task (runs in the scheduler) to write landing parquet — from .env
+    # MinIO credentials for tasks that touch object storage — from .env
     MINIO_ENDPOINT: ${MINIO_ENDPOINT}
     MINIO_ROOT_USER: ${MINIO_ROOT_USER}
     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -53,9 +53,6 @@ services:
       # trino
       TRINO_HOST: trino
       TRINO_PORT: 8080
-      # datahub
-      DATAHUB_GMS_HOST: datahub-gms
-      DATAHUB_GMS_PORT: 8080
     entrypoint: ["/bin/bash", "/opt/airflow/scripts/init.sh"]
     volumes:
       - ../airflow/scripts:/opt/airflow/scripts

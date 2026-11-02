@@ -1,9 +1,9 @@
-"""Shared helpers for every Spark job in the lakehouse pipeline.
+"""Shared helpers for every Spark job on the platform.
 
 WHY separate: the repo's `spark-defaults.conf` does NOT declare the Iceberg/Polaris
 catalog (only eventlog + timezone), so each job must load the REST catalog config
-itself when building the SparkSession. Keeping it in one place lets the 3 jobs
-bronze/silver/gold reuse it and avoids duplicated or drifting config between jobs.
+itself when building the SparkSession. Keeping it in one place lets every job reuse
+it and avoids duplicated or drifting config between jobs.
 
 Config is read from environment variables (injected via compose/spark.yml, from .env) —
 NO secrets hardcoded in code, per repo convention.
@@ -17,13 +17,6 @@ from pyspark.sql import SparkSession
 
 # Catalog name matches the catalog created in polaris/scripts/init.sh
 CATALOG = "lakehouse"
-
-# Default symbol list for the demo. Can be overridden when calling a job (see each job).
-DEFAULT_SYMBOLS = ["FPT", "VNM", "ACB", "HPG", "MWG"]
-
-# Landing path of the ingest layer (raw parquet) on MinIO.
-# s3a:// for Spark (hadoop-aws), s3:// for Python clients (s3fs/boto3).
-LANDING_PREFIX = "bronze/_landing/stock_ohlcv"
 
 
 def _env(name: str, default: str | None = None) -> str:
@@ -53,7 +46,7 @@ def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> Spa
     - credential=root:<secret> + scope=PRINCIPAL_ROLE:ALL: the same client-credentials
       polaris/scripts/init.sh uses to get a token.
     - io-impl=S3FileIO + s3.*: Iceberg reads/writes data files directly on MinIO.
-    - fs.s3a.*: lets Spark read the raw landing parquet (outside Iceberg).
+    - fs.s3a.*: lets Spark read plain files on MinIO (outside Iceberg).
     - path-style-access=true + ssl=false: required for MinIO (not real AWS).
     """
     minio_endpoint = _env("MINIO_ENDPOINT", "http://minio:9000")
@@ -82,7 +75,7 @@ def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> Spa
         .config(f"spark.sql.catalog.{CATALOG}.s3.access-key-id", minio_user)
         .config(f"spark.sql.catalog.{CATALOG}.s3.secret-access-key", minio_pass)
         .config("spark.sql.defaultCatalog", CATALOG)
-        # --- s3a to read the raw landing parquet ---
+        # --- s3a for plain files on MinIO ---
         .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
         .config("spark.hadoop.fs.s3a.access.key", minio_user)
         .config("spark.hadoop.fs.s3a.secret.key", minio_pass)
@@ -98,8 +91,3 @@ def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> Spa
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
-
-
-def landing_s3a_uri() -> str:
-    """s3a URI for Spark to read all parquet in the landing layer."""
-    return f"s3a://{minio_bucket()}/{LANDING_PREFIX}"

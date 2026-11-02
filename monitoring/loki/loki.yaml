@@ -30,7 +30,7 @@ schema_config:
 
 limits_config:
   retention_period: 168h
-  # Some services log in bursts at startup (DataHub, Kafka); avoid 429s on push.
+  # Some services log in bursts at startup (Kafka, Spark); avoid 429s on push.
   ingestion_rate_mb: 16
   ingestion_burst_size_mb: 32
 

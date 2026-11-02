@@ -19,7 +19,7 @@ services:
     environment:
       SPARK_MASTER_HOST: spark-master
       SPARK_MASTER_OPTS: "-Dspark.master.rest.enabled=true -Dspark.master.rest.port=6066"
-      # config read by jobs in common.py (Polaris REST catalog + MinIO) — from .env
+      # config read by jobs in helper.py (Polaris REST catalog + MinIO) — from .env
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -45,7 +45,7 @@ services:
   spark-worker:
     image: custom-spark:3.5.1
     container_name: spark-worker
-    # the driver runs on the worker (cluster mode), so it needs Polaris/MinIO env for common.py
+    # the driver runs on the worker (cluster mode), so it needs Polaris/MinIO env for helper.py
     environment:
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}

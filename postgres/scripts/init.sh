@@ -28,7 +28,7 @@ function create_login() {
     else
         echo "  -> creating login '$username'..."
 
-        output=$(psql -v on_error_stop=1 -h postgres -c "create role $username with login password '$password';" 2>&1)
+        output=$(psql -v on_error_stop=1 -h postgres -c "create role \"$username\" with login password '$password';" 2>&1)
         exit_code=$?
 
         if [ $exit_code -ne 0 ]; then
@@ -56,7 +56,7 @@ function create_database() {
     else
         echo "  -> creating database '$database' owned by '$username'..."
 
-        output=$(psql -v on_error_stop=1 -h postgres -c "create database $database owner $username;" 2>&1)
+        output=$(psql -v on_error_stop=1 -h postgres -c "create database \"$database\" owner \"$username\";" 2>&1)
         exit_code=$?
 
         if [ $exit_code -ne 0 ]; then
@@ -79,15 +79,7 @@ else
     echo "warning: missing airflow vars."
 fi
 
-# 2.2. datahub
-if [ -n "$DATAHUB_ADMIN_USERNAME" ] && [ -n "$POSTGRES_DB_DATAHUB" ] && [ -n "$DATAHUB_ADMIN_PASSWORD" ]; then
-    create_login "$DATAHUB_ADMIN_USERNAME" "$DATAHUB_ADMIN_PASSWORD"
-    create_database "$POSTGRES_DB_DATAHUB" "$DATAHUB_ADMIN_USERNAME"
-else
-    echo "warning: missing datahub vars."
-fi
-
-# 2.3. polaris
+# 2.2. polaris
 if [ -n "$POLARIS_ADMIN_USERNAME" ] && [ -n "$POSTGRES_DB_POLARIS" ] && [ -n "$POLARIS_ADMIN_PASSWORD" ]; then
     create_login "$POLARIS_ADMIN_USERNAME" "$POLARIS_ADMIN_PASSWORD"
     create_database "$POSTGRES_DB_POLARIS" "$POLARIS_ADMIN_USERNAME"

@@ -6,9 +6,6 @@
 .env.*
 !.env.example
 
-# temporary venv used to verify vnstock — not part of the stack, safe to delete any time
-.scratch_vnstock/
-
 # Python
 __pycache__/
 *.py[cod]

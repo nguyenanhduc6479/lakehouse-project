@@ -7,17 +7,3 @@ apache-airflow-providers-http==4.11.1          # calls the Spark REST API (clust
 apache-airflow-providers-amazon==8.24.0        # MinIO / S3
 apache-airflow-providers-postgres==5.11.1      # PostgreSQL
 apache-airflow-providers-trino==5.7.1          # Trino ad-hoc queries
-
-# datahub ingestion recipes
-acryl-datahub[airflow]==0.12.1.5
-
-# ingest OHLCV (the ingest task in DAG lakehouse_ohlcv).
-# vnstock TEMPORARILY REMOVED: PyPI currently has no files for the `vnstock` package (empty
-# simple index, JSON API 404 — checked 2026-10-27), so `vnstock==4.0.4` breaks the image build.
-# ingest_ohlcv.py imports vnstock lazily (inside a function) so the DAG still parses; only the
-# ingest_landing task fails at run time until a replacement source exists (trying vnstock3).
-# vnstock==4.0.4
-# pandas/pyarrow to write parquet to MinIO via boto3 (already provided by the amazon provider).
-# pyarrow must match constraints-2.9.2 (pinned 14.0.2); any mismatch -> pip ResolutionImpossible.
-pandas==2.1.4
-pyarrow==14.0.2

@@ -1,8 +1,7 @@
 """Shared fixtures for the pipeline tests.
 
 `spark`: SparkSession local[1] scope=session — lightweight, no MinIO/Polaris/Iceberg needed
-since the tests only check pure transform LOGIC (clean_silver, build_gold, transform_bronze)
-on hand-built in-memory DataFrames.
+since the tests only check pure transform LOGIC on hand-built in-memory DataFrames.
 
 Running the tests needs pyspark==3.5.1 + Java (JDK 8/11/17). Simplest: run inside the
 custom-spark container (`docker compose exec spark-master python -m pytest /opt/...`) or on

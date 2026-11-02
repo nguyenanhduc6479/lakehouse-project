@@ -1,0 +1,37 @@
+# source-db: the simulated OLTP source for CDC. A separate instance from the shared `postgres`
+# (infra.yml) on purpose: wal_level=logical and the replication slot's WAL retention apply to the
+# whole instance, and CDC experiments (stopping Debezium, schema changes, resets) must not touch
+# Airflow/Polaris/silver.
+services:
+  source-db:
+    image: postgres:16
+    container_name: source-db
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      # cap the WAL an unread replication slot may hold, so a stopped Debezium can't fill the disk
+      - "-c"
+      - "max_slot_wal_keep_size=1GB"
+    environment:
+      POSTGRES_USER: ${SOURCE_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${SOURCE_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${SOURCE_POSTGRES_DB}
+      TZ: Asia/Ho_Chi_Minh
+    ports: ["5433:5432"]      # 5433 on host: 5432 is the shared postgres
+    volumes:
+      - source_db_data_vol:/var/lib/postgresql/data
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SOURCE_POSTGRES_USER} -d ${SOURCE_POSTGRES_DB}"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  source_db_data_vol:
+
+networks:
+  lakehouse:
+    driver: bridge

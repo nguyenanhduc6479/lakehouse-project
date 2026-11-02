@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16
     container_name: postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -18,7 +18,7 @@ services:
       start_period: 5s
 
   postgres-setup:
-    image: postgres:15
+    image: postgres:16
     container_name: postgres-setup
     depends_on:
       postgres:
@@ -38,9 +38,6 @@ services:
       POSTGRES_DB_POLARIS: ${POSTGRES_DB_POLARIS}
       POLARIS_ADMIN_USERNAME: ${POLARIS_ADMIN_USERNAME}
       POLARIS_ADMIN_PASSWORD: ${POLARIS_ADMIN_PASSWORD}
-      POSTGRES_DB_DATAHUB: ${POSTGRES_DB_DATAHUB}
-      DATAHUB_ADMIN_USERNAME: ${DATAHUB_ADMIN_USERNAME}
-      DATAHUB_ADMIN_PASSWORD: ${DATAHUB_ADMIN_PASSWORD}
     command: ["bash", "/scripts/init.sh"]
     networks: [lakehouse]
 
@@ -87,25 +84,26 @@ services:
       retries: 5
       start_period: 30s
 
-  kafka-setup:
-    image: confluentinc/cp-kafka:7.6.0
-    container_name: kafka-setup
+  # Confluent Schema Registry: stores the Avro schemas of the CDC topics (Debezium registers them,
+  # the Iceberg sink reads them). No host port: 8081 is taken by the spark-worker UI.
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    container_name: schema-registry
+    restart: on-failure
     depends_on:
       kafka:
         condition: service_healthy
-    volumes:
-      - kafka_data_vol:/var/lib/kafka/data
-      - kafka_secret_vol:/etc/kafka/secrets
-    command: >
-      bash -c "
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataChangeProposal_v1 --partitions 1 --replication-factor 1 &&
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataChangeLog_Versioned_v1 --partitions 1 --replication-factor 1 &&
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataChangeLog_Timeseries_v1 --partitions 1 --replication-factor 1 &&
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic MetadataAuditEvent_v4 --partitions 1 --replication-factor 1 &&
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic PlatformEvent_v1 --partitions 1 --replication-factor 1 &&
-        echo 'Kafka topics created.'
-      "
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   elasticsearch:
     image: elasticsearch:7.17.10
