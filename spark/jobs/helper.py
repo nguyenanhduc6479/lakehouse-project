@@ -1,7 +1,7 @@
 """Shared helpers for every Spark job on the platform.
 
 WHY separate: the repo's `spark-defaults.conf` does NOT declare the Iceberg/Polaris
-catalog (only eventlog + timezone), so each job must load the REST catalog config
+catalog (only the timezone), so each job must load the REST catalog config
 itself when building the SparkSession. Keeping it in one place lets every job reuse
 it and avoids duplicated or drifting config between jobs.
 
@@ -30,12 +30,12 @@ def _env(name: str, default: str | None = None) -> str:
     return val
 
 
-def minio_bucket() -> str:
-    return _env("MINIO_BUCKET", "lakehouse")
+def s3_bucket() -> str:
+    return _env("S3_BUCKET", "data-platform")
 
 
 def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> SparkSession:
-    """Build a SparkSession wired to Polaris (Iceberg REST + OAuth2) and MinIO (S3).
+    """Build a SparkSession wired to Polaris (Iceberg REST + OAuth2) and RustFS (S3).
 
     `extra_conf`: job-specific Spark configs (e.g. {"spark.sql.shuffle.partitions": "8"}).
     Applied after the defaults below, so a job can also override one of them.
@@ -45,13 +45,14 @@ def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> Spa
       a Hive metastore or Nessie (see CLAUDE.md).
     - credential=root:<secret> + scope=PRINCIPAL_ROLE:ALL: the same client-credentials
       polaris/scripts/init.sh uses to get a token.
-    - io-impl=S3FileIO + s3.*: Iceberg reads/writes data files directly on MinIO.
-    - fs.s3a.*: lets Spark read plain files on MinIO (outside Iceberg).
-    - path-style-access=true + ssl=false: required for MinIO (not real AWS).
+    - io-impl=S3FileIO + s3.*: Iceberg reads/writes data files directly on RustFS.
+    - fs.s3a.*: lets Spark read plain files on RustFS (outside Iceberg).
+    - path-style-access=true + ssl=false: required for RustFS (not real AWS; path-style only).
     """
-    minio_endpoint = _env("MINIO_ENDPOINT", "http://minio:9000")
-    minio_user = _env("MINIO_ROOT_USER")
-    minio_pass = _env("MINIO_ROOT_PASSWORD")
+    s3_endpoint = _env("S3_ENDPOINT", "http://rustfs:9000")
+    s3_access_key = _env("S3_ACCESS_KEY")
+    s3_secret_key = _env("S3_SECRET_KEY")
+    s3_region = _env("S3_REGION", "us-east-1")
     polaris_secret = _env("POLARIS_SECRET")
     polaris_uri = _env("POLARIS_URI", "http://polaris:8181/api/catalog")
 
@@ -68,17 +69,19 @@ def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> Spa
         .config(f"spark.sql.catalog.{CATALOG}.warehouse", CATALOG)
         .config(f"spark.sql.catalog.{CATALOG}.credential", f"root:{polaris_secret}")
         .config(f"spark.sql.catalog.{CATALOG}.scope", "PRINCIPAL_ROLE:ALL")
-        # --- Iceberg FileIO to MinIO ---
+        # --- Iceberg FileIO to RustFS ---
         .config(f"spark.sql.catalog.{CATALOG}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
-        .config(f"spark.sql.catalog.{CATALOG}.s3.endpoint", minio_endpoint)
+        .config(f"spark.sql.catalog.{CATALOG}.s3.endpoint", s3_endpoint)
         .config(f"spark.sql.catalog.{CATALOG}.s3.path-style-access", "true")
-        .config(f"spark.sql.catalog.{CATALOG}.s3.access-key-id", minio_user)
-        .config(f"spark.sql.catalog.{CATALOG}.s3.secret-access-key", minio_pass)
+        .config(f"spark.sql.catalog.{CATALOG}.s3.access-key-id", s3_access_key)
+        .config(f"spark.sql.catalog.{CATALOG}.s3.secret-access-key", s3_secret_key)
+        .config(f"spark.sql.catalog.{CATALOG}.client.region", s3_region)
         .config("spark.sql.defaultCatalog", CATALOG)
-        # --- s3a for plain files on MinIO ---
-        .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
-        .config("spark.hadoop.fs.s3a.access.key", minio_user)
-        .config("spark.hadoop.fs.s3a.secret.key", minio_pass)
+        # --- s3a for plain files on RustFS ---
+        .config("spark.hadoop.fs.s3a.endpoint", s3_endpoint)
+        .config("spark.hadoop.fs.s3a.access.key", s3_access_key)
+        .config("spark.hadoop.fs.s3a.secret.key", s3_secret_key)
+        .config("spark.hadoop.fs.s3a.endpoint.region", s3_region)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
         .config(

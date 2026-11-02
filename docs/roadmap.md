@@ -28,9 +28,17 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 
 - Removed the old vnstock OHLCV pipeline (Spark jobs, ingest, DAG, tests) and the old docs.
 - Removed DataHub; moved Schema Registry into `compose/infra.yml` (needed for Avro).
-- Kept: Postgres, Kafka + Zookeeper, Schema Registry, Elasticsearch, MinIO, Polaris, Spark, Trino,
+- Kept: Postgres, Kafka + Zookeeper, Schema Registry, Elasticsearch, object storage (now RustFS), Polaris, Spark, Trino,
   Airflow, Grafana/Loki/Alloy.
 - Rebuilt from empty volumes (`docker compose down -v`); both Postgres instances on `postgres:16`.
+- Infra hardening (2026-11-02): switched to the native Docker Engine in WSL; MinIO → RustFS
+  (`S3_*` variables, one bucket `data-platform`); removed `spark-thrift` and dbt-spark; every
+  image pinned; `TZ` on every long-running service; Kafka transaction log at RF 1; Spark event logs
+  off and `spark.master` fixed (REST jobs used to run in `local[*]`); Grafana now shows the logs of
+  every container (Docker json-file logs, startup gated on Alloy) and of Spark jobs.
+- Verified: all 21 services up; every service reachable by name on the `lakehouse` network
+  (TCP + app-level: Airflow connections, Polaris OAuth2, Kafka round-trip, Schema Registry write);
+  `trino_conn` fixed (it had no user → HTTP 401).
 
 ## Phase 2 — Source *(in progress)*
 
@@ -82,7 +90,7 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   client supports the OAuth2 `scope` property.
 - [ ] Register the sink connector (design §5): `InsertField` SMT for `_topic` / `_partition` /
   `_offset` / `_ingested_at`, static routing of the three topics, auto-create + schema
-  evolution, `day(_ingested_at)` partitioning, `format-version=2`, Polaris + MinIO config.
+  evolution, `day(_ingested_at)` partitioning, `format-version=2`, Polaris + S3 (RustFS) config.
 
 **Done when:**
 - `SHOW TABLES FROM lakehouse.bronze` in Trino → `users_cdc`, `orders_cdc`, `order_details_cdc`.
@@ -101,7 +109,8 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - [ ] `spark/jobs/job_silver.py`: incremental read from the checkpoint snapshot, events →
   versions (last event per key per transaction, `lead` for `valid_to`), write
   `staging.<table>` + `staging.batch`. Transform logic in pure functions with pytest tests.
-- [ ] Airflow connection `silver_conn` in `airflow/scripts/init.sh`.
+- [ ] Postgres credentials for the Spark services (JDBC to `data-platform`); Airflow already has
+  `postgres_conn` pointing at `data-platform`, so no new connection is needed.
 - [ ] Task `silver_apply`: in one transaction, add new columns, run the two SCD2 statements
   (design §6.4), advance the checkpoint.
 - [ ] DAG `platform_pipeline` (`schedule=None`): `silver_spark` → `silver_apply`.
@@ -118,8 +127,9 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 **Goal:** analytical models in ClickHouse and a dashboard in Superset.
 
 - [ ] ClickHouse service (new module), named collection pointing at `data-platform`.
-- [ ] Replace dbt-spark with dbt-clickhouse in the Airflow image (check it resolves against the
-  Airflow 2.9.2 constraints); rewrite `dbt/profiles.yml` and `dbt/dbt_project.yml`.
+- [ ] Add dbt-clickhouse to the Airflow image (check it resolves against the
+  Airflow 2.9.2 constraints); create `dbt/profiles.yml` (removed with dbt-spark) and fill
+  `dbt/dbt_project.yml`.
 - [ ] Models (design §8): ephemeral staging over `postgresql()`; `dim_users`, `dim_date`,
   `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, is_deleted)`);
   marts for revenue per day and per city; `get_watermark` macro; dbt tests.
@@ -164,5 +174,8 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 ## Throughout
 
 - Pin every new image and library to an explicit version.
+- Every new service gets `logging: *default-logging` and waits (directly or through its
+  dependencies) for `alloy`, otherwise its logs are missing from Grafana.
 - Keep `CLAUDE.md` and the **Status** column above current at the end of each phase.
-- Use Grafana (3000) → "Container logs" to debug any service.
+- Use Grafana (3000) → "Container logs" to debug any service; Spark job logs are under
+  `service=spark-job`.

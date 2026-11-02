@@ -1,15 +1,29 @@
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
   trino:
     # >= 454: first release with iceberg.rest-catalog.oauth2.scope — Polaris requires
     # scope PRINCIPAL_ROLE:ALL; 435 can't set it, so it fails with invalid_scope.
     image: trinodb/trino:454
     container_name: trino
+    logging: *default-logging
     environment:
+      TZ: ${TZ}
       POLARIS_SECRET: ${POLARIS_SECRET}
-      # read by trino/catalog/lakehouse.properties via ${ENV:...} to access data files on MinIO
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # read by trino/catalog/lakehouse.properties via ${ENV:...} to access data files on RustFS
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_REGION: ${S3_REGION}
     ports: ["8080:8080"]
     volumes:
       - ../trino/catalog:/etc/trino/catalog

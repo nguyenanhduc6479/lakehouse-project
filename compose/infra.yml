@@ -1,11 +1,29 @@
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16
     container_name: postgres
+    logging: *default-logging
+    depends_on:
+      # start only once log shipping works, so Alloy -> Loki captures this service (and everything
+      # that depends on it) from its first line; Alloy's healthcheck also probes Loki
+      alloy:
+        condition: service_healthy
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ} # also becomes the server's default `timezone` at initdb
     ports: ["5432:5432"]
     volumes:
       - postgres_data_vol:/var/lib/postgresql/data
@@ -20,6 +38,7 @@ services:
   postgres-setup:
     image: postgres:16
     container_name: postgres-setup
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,9 +63,16 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.0
     container_name: zookeeper
+    logging: *default-logging
+    depends_on:
+      # start only once log shipping works, so Alloy -> Loki captures this service (and everything
+      # that depends on it) from its first line; Alloy's healthcheck also probes Loki
+      alloy:
+        condition: service_healthy
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      TZ: ${TZ}
     volumes:
       - zookeeper_data_vol:/var/lib/zookeeper/data
       - zookeeper_log_vol:/var/lib/zookeeper/log
@@ -62,23 +88,30 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.6.0
     container_name: kafka
+    logging: *default-logging
     depends_on:
       zookeeper:
         condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
+      TZ: ${TZ}
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # single broker: the transaction log defaults to RF 3 / min ISR 2, which would make every
+      # transactional producer (the Iceberg sink's exactly-once commits) fail
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data_vol:/var/lib/kafka/data
       - kafka_secret_vol:/etc/kafka/secrets
     networks: [lakehouse]
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      test:
+        ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 30s
       timeout: 20s
       retries: 5
@@ -89,6 +122,7 @@ services:
   schema-registry:
     image: confluentinc/cp-schema-registry:7.6.0
     container_name: schema-registry
+    logging: *default-logging
     restart: on-failure
     depends_on:
       kafka:
@@ -97,6 +131,9 @@ services:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      TZ: ${TZ}
+    volumes:
+      - schema_registry_secret_vol:/etc/schema-registry/secrets
     networks: [lakehouse]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
@@ -108,10 +145,17 @@ services:
   elasticsearch:
     image: elasticsearch:7.17.10
     container_name: elasticsearch
+    logging: *default-logging
+    depends_on:
+      # start only once log shipping works, so Alloy -> Loki captures this service (and everything
+      # that depends on it) from its first line; Alloy's healthcheck also probes Loki
+      alloy:
+        condition: service_healthy
     environment:
       discovery.type: single-node
       ES_JAVA_OPTS: "-Xms512m -Xmx512m"
       xpack.security.enabled: "false"
+      TZ: ${TZ}
     volumes:
       - elasticsearch_data_vol:/usr/share/elasticsearch/data
     networks: [lakehouse]
@@ -129,6 +173,7 @@ volumes:
   zookeeper_secret_vol:
   kafka_data_vol:
   kafka_secret_vol:
+  schema_registry_secret_vol:
   elasticsearch_data_vol:
 
 networks:

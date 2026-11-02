@@ -9,7 +9,8 @@ tầng gold OLAP cho dashboard, và một search index cho web app.
 
 **Phạm vi: demo, không phải production.** Chỉ cần chạy được và dễ theo dõi. Nghĩa là:
 
-- Chỉ Docker Compose (không Kubernetes, không operator).
+- Chỉ Docker Compose (không Kubernetes, không operator), chạy trên Docker Engine cài thẳng trong WSL
+  (không dùng Docker Desktop).
 - Nguồn là một database Postgres được ghi dữ liệu bởi một script Python generator.
 - Các DAG Airflow được kích hoạt **thủ công** (`schedule=None`).
 - Không HA, read replica, connection pooler, TLS hay backup.
@@ -23,7 +24,7 @@ flowchart TD
     SRC -->|"WAL / logical decoding"| DBZ["Debezium on Kafka Connect"]
     DBZ -->|Avro| KAFKA[Kafka]
     DBZ -.->|"register schema"| SR[Schema Registry]
-    KAFKA -->|"Iceberg sink"| BRONZE[("Bronze: Iceberg on MinIO, Polaris catalog")]
+    KAFKA -->|"Iceberg sink"| BRONZE[("Bronze: Iceberg on RustFS, Polaris catalog")]
     SR -.->|"read schema"| BRONZE
     BRONZE -->|"PySpark: SCD2"| SILVER[("Silver: Postgres")]
     BRONZE -.->|"inspect / debug"| TRINO[Trino]
@@ -47,7 +48,7 @@ Mỗi tầng có đúng một công cụ truy vấn, để các SQL engine khôn
 
 | Tầng | Lưu ở | Truy vấn bằng |
 |---|---|---|
-| Bronze | Iceberg trên MinIO (Polaris) | **Trino** — chỉ để kiểm tra và debug |
+| Bronze | Iceberg trên RustFS (Polaris) | **Trino** — chỉ để kiểm tra và debug |
 | Silver | Postgres | Postgres thuần (`psql`, API) |
 | Gold | ClickHouse | **ClickHouse** — OLAP cho Superset và API |
 
@@ -64,18 +65,22 @@ nguồn bên ngoài).
 | Kafka Connect | Chạy Debezium (source) và Iceberg sink | Image tự build trên `confluentinc/cp-kafka-connect` (có sẵn AvroConverter) + plugin Debezium Postgres + file zip Iceberg sink (không được publish thành artifact — build từ source Iceberg trong Dockerfile multi-stage) |
 | Kafka (+ Zookeeper) | Vận chuyển event Avro | Đã có trong `compose/infra.yml` |
 | Schema Registry | Lưu schema Avro, kiểm tra tương thích | Đã có trong `compose/infra.yml` |
-| MinIO + Iceberg | Bronze: change event chỉ ghi thêm (append-only) | Đã có trong stack |
+| RustFS (S3) + Iceberg | Bronze: change event chỉ ghi thêm (append-only) | Đã có trong stack (`rustfs/rustfs:1.0.4`, thay cho MinIO) |
 | Polaris | Iceberg REST catalog cho bronze | Đã có trong stack (OAuth2, scope `PRINCIPAL_ROLE:ALL`) |
 | Trino | SQL trên bronze (kiểm tra, debug, kịch bản test) | Đã có trong stack; không nằm trên luồng dữ liệu chính |
-| PySpark | Bronze → silver (SCD Type 2) | Spark cluster hiện có, submit qua REST 6066 |
-| Postgres (silver, Postgres 16) | Các bảng silver, đồng thời là database của web app | Database `data-platform` (`POSTGRES_DB`) trên service `postgres` hiện có, bên cạnh `airflow` và `polaris` |
+| PySpark | Bronze → silver (SCD Type 2) | Spark cluster hiện có, submit qua REST 6066; `spark.master` được đặt trong `spark-defaults.conf` để job submit qua REST chạy trên executor thật; log của driver/executor hiện trên Grafana (`service=spark-job`) |
+| Postgres (silver, Postgres 16) | Các bảng silver, đồng thời là database của web app | Database `data-platform` (`POSTGRES_DB`) trên service `postgres` hiện có, bên cạnh `airflow` và `polaris`; Airflow kết nối tới nó qua `postgres_conn` |
 | ClickHouse | Gold (OLAP): lưu các bảng gold, phục vụ Superset và API | Một node |
-| dbt-clickhouse | Silver → gold | Chạy trong container Airflow (`./dbt`); thay cho bản pin dbt-spark hiện tại — cần kiểm tra nó resolve được với constraints của Airflow 2.9.2 |
+| dbt-clickhouse | Silver → gold | Chạy trong container Airflow (`./dbt`); thêm vào `airflow/requirements.txt` ở phase gold — cần kiểm tra nó resolve được với constraints của Airflow 2.9.2 |
 | Superset | Dashboard | Image tự build thêm driver `clickhouse-connect` (image gốc không có) |
 | Elasticsearch 7.17 | Tìm kiếm cho web app | Đã có trong `compose/infra.yml`; Python client phải là `elasticsearch` 7.x (8.x từ chối server 7.x) |
 | FastAPI | Đường đọc duy nhất của web app | ES cho tìm kiếm, silver cho chi tiết/lịch sử, gold cho số liệu |
 | Airflow | Điều phối các bước batch | Chỉ kích hoạt thủ công; tự chạy các task nhẹ (SQL trên Postgres, ES sync); các transform nặng chạy trong Spark và dbt |
-| Grafana + Loki + Alloy | Log của container | Đã có trong stack |
+| Grafana + Loki + Alloy | Log của mọi container (file log json-file của Docker) và của các job Spark | Đã có trong stack; mọi service chỉ khởi động sau khi Alloy healthy, nên không sót dòng log nào |
+
+Mọi service dùng chung một bridge network là `lakehouse` và gọi nhau bằng tên service
+(`kafka:29092`, `http://polaris:8181`, `postgres:5432`, …); port trên host và các connection của
+Airflow được liệt kê trong [services.md](services.md).
 
 ## 3. Nguồn
 
@@ -261,10 +266,11 @@ Cấu hình sink connector:
   "iceberg.catalog.credential": "root:${env:POLARIS_SECRET}",
   "iceberg.catalog.scope": "PRINCIPAL_ROLE:ALL",
   "iceberg.catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
-  "iceberg.catalog.s3.endpoint": "http://minio:9000",
+  "iceberg.catalog.s3.endpoint": "${env:S3_ENDPOINT}",
   "iceberg.catalog.s3.path-style-access": "true",
-  "iceberg.catalog.s3.access-key-id": "${env:MINIO_ROOT_USER}",
-  "iceberg.catalog.s3.secret-access-key": "${env:MINIO_ROOT_PASSWORD}"
+  "iceberg.catalog.s3.access-key-id": "${env:S3_ACCESS_KEY}",
+  "iceberg.catalog.s3.secret-access-key": "${env:S3_SECRET_KEY}",
+  "iceberg.catalog.client.region": "${env:S3_REGION}"
 }
 ```
 
@@ -433,7 +439,7 @@ HTML tĩnh duy nhất do API phục vụ.
 **Airflow — DAG `platform_pipeline`, `schedule=None`, kích hoạt thủ công:**
 
 1. `silver_spark` — submit `job_silver.py` qua Spark REST 6066.
-2. `silver_apply` — chạy SQL SCD2 (§6.4) trên Postgres và đẩy checkpoint lên.
+2. `silver_apply` — chạy SQL SCD2 (§6.4) trên Postgres qua `postgres_conn` và đẩy checkpoint lên.
 3. Song song: `sync_es` và `dbt run` + `dbt test` trên ClickHouse.
 
 Bronze không phải là một bước Airflow: Iceberg sink ghi nó liên tục.

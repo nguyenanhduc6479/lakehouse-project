@@ -28,9 +28,17 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 
 - Đã xóa pipeline OHLCV vnstock cũ (Spark job, ingest, DAG, test) và các tài liệu cũ.
 - Đã gỡ DataHub; chuyển Schema Registry sang `compose/infra.yml` (cần cho Avro).
-- Giữ lại: Postgres, Kafka + Zookeeper, Schema Registry, Elasticsearch, MinIO, Polaris, Spark,
+- Giữ lại: Postgres, Kafka + Zookeeper, Schema Registry, Elasticsearch, object storage (nay là RustFS), Polaris, Spark,
   Trino, Airflow, Grafana/Loki/Alloy.
 - Dựng lại từ volume trống (`docker compose down -v`); cả hai instance Postgres dùng `postgres:16`.
+- Gia cố hạ tầng (2026-11-02): chuyển sang Docker Engine cài thẳng trong WSL; MinIO → RustFS
+  (biến `S3_*`, một bucket `data-platform`); gỡ `spark-thrift` và dbt-spark; pin phiên bản mọi
+  image; `TZ` cho mọi service chạy lâu dài; transaction log của Kafka ở RF 1; tắt event log của
+  Spark và sửa `spark.master` (trước đó job submit qua REST chạy `local[*]`); Grafana hiện log của
+  mọi container (file log json-file của Docker, khởi động chờ Alloy) và của các job Spark.
+- Đã kiểm tra: đủ 21 service; mọi service gọi được nhau bằng tên trên network `lakehouse`
+  (TCP + mức ứng dụng: các connection của Airflow, OAuth2 của Polaris, gửi/nhận Kafka, ghi Schema
+  Registry); đã sửa `trino_conn` (thiếu user → HTTP 401).
 
 ## Phase 2 — Nguồn *(đang làm)*
 
@@ -83,7 +91,7 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   trợ thuộc tính OAuth2 `scope`.
 - [ ] Đăng ký sink connector (design §5): SMT `InsertField` thêm `_topic` / `_partition` /
   `_offset` / `_ingested_at`, định tuyến tĩnh ba topic, tự tạo bảng + schema evolution, partition
-  `day(_ingested_at)`, `format-version=2`, cấu hình Polaris + MinIO.
+  `day(_ingested_at)`, `format-version=2`, cấu hình Polaris + S3 (RustFS).
 
 **Hoàn thành khi:**
 - `SHOW TABLES FROM lakehouse.bronze` trong Trino → `users_cdc`, `orders_cdc`, `order_details_cdc`.
@@ -103,7 +111,8 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - [ ] `spark/jobs/job_silver.py`: đọc incremental từ snapshot trong checkpoint, chuyển event thành
   phiên bản (mỗi khóa chỉ lấy event cuối trong một transaction, dùng `lead` để tính `valid_to`), ghi
   `staging.<table>` + `staging.batch`. Logic transform viết thành hàm thuần, có test pytest.
-- [ ] Connection Airflow `silver_conn` trong `airflow/scripts/init.sh`.
+- [ ] Credential Postgres cho các service Spark (JDBC tới `data-platform`); Airflow đã có sẵn
+  `postgres_conn` trỏ tới `data-platform`, nên không cần thêm connection mới.
 - [ ] Task `silver_apply`: trong một transaction, thêm cột mới, chạy hai câu SCD2 (design §6.4),
   đẩy checkpoint lên.
 - [ ] DAG `platform_pipeline` (`schedule=None`): `silver_spark` → `silver_apply`.
@@ -120,8 +129,9 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 **Mục tiêu:** mô hình phân tích trong ClickHouse và dashboard trong Superset.
 
 - [ ] Service ClickHouse (module mới), named collection trỏ tới `data-platform`.
-- [ ] Thay dbt-spark bằng dbt-clickhouse trong image Airflow (kiểm tra cài được cùng constraints
-  của Airflow 2.9.2); viết lại `dbt/profiles.yml` và `dbt/dbt_project.yml`.
+- [ ] Thêm dbt-clickhouse vào image Airflow (kiểm tra cài được cùng constraints
+  của Airflow 2.9.2); tạo `dbt/profiles.yml` (đã bị xóa cùng dbt-spark) và viết nội dung cho
+  `dbt/dbt_project.yml`.
 - [ ] Model (design §8): staging ephemeral đọc qua `postgresql()`; `dim_users`, `dim_date`,
   `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, is_deleted)`);
   mart doanh thu theo ngày và theo thành phố; macro `get_watermark`; dbt test.
@@ -165,5 +175,8 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 ## Xuyên suốt các phase
 
 - Pin mọi image và thư viện mới vào một phiên bản cụ thể.
+- Mọi service mới phải có `logging: *default-logging` và phải chờ `alloy` (trực tiếp hoặc thông
+  qua các service nó phụ thuộc), nếu không log của nó sẽ không có trên Grafana.
 - Cập nhật `CLAUDE.md` và cột **Trạng thái** ở trên khi kết thúc mỗi phase.
-- Dùng Grafana (3000) → "Container logs" để debug bất kỳ service nào.
+- Dùng Grafana (3000) → "Container logs" để debug bất kỳ service nào; log của job Spark nằm
+  dưới `service=spark-job`.

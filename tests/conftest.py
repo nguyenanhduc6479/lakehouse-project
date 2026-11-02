@@ -1,6 +1,6 @@
 """Shared fixtures for the pipeline tests.
 
-`spark`: SparkSession local[1] scope=session — lightweight, no MinIO/Polaris/Iceberg needed
+`spark`: SparkSession local[1] scope=session — lightweight, no S3/Polaris/Iceberg needed
 since the tests only check pure transform LOGIC on hand-built in-memory DataFrames.
 
 Running the tests needs pyspark==3.5.1 + Java (JDK 8/11/17). Simplest: run inside the

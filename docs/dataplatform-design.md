@@ -6,7 +6,8 @@ layer, an OLAP gold layer for dashboards, and a search index for a web app.
 
 **Scope: demo, not production.** It only has to run and be easy to follow. That means:
 
-- Docker Compose only (no Kubernetes, no operators).
+- Docker Compose only (no Kubernetes, no operators), on the native Docker Engine inside WSL
+  (not Docker Desktop).
 - The source is a Postgres database filled by one Python generator script.
 - Airflow DAGs are triggered **manually** (`schedule=None`).
 - No HA, read replicas, connection poolers, TLS or backups.
@@ -20,7 +21,7 @@ flowchart TD
     SRC -->|"WAL / logical decoding"| DBZ["Debezium on Kafka Connect"]
     DBZ -->|Avro| KAFKA[Kafka]
     DBZ -.->|"register schema"| SR[Schema Registry]
-    KAFKA -->|"Iceberg sink"| BRONZE[("Bronze: Iceberg on MinIO, Polaris catalog")]
+    KAFKA -->|"Iceberg sink"| BRONZE[("Bronze: Iceberg on RustFS, Polaris catalog")]
     SR -.->|"read schema"| BRONZE
     BRONZE -->|"PySpark: SCD2"| SILVER[("Silver: Postgres")]
     BRONZE -.->|"inspect / debug"| TRINO[Trino]
@@ -44,7 +45,7 @@ Each layer has one query tool, so the SQL engines don't overlap:
 
 | Layer | Stored in | Queried with |
 |---|---|---|
-| Bronze | Iceberg on MinIO (Polaris) | **Trino** — inspection and debugging only |
+| Bronze | Iceberg on RustFS (Polaris) | **Trino** — inspection and debugging only |
 | Silver | Postgres | Plain Postgres (`psql`, the API) |
 | Gold | ClickHouse | **ClickHouse** — OLAP for Superset and the API |
 
@@ -60,18 +61,22 @@ OLAP engine (MergeTree, background merges, `FINAL`, incremental loads from an ex
 | Kafka Connect | Runs Debezium (source) and the Iceberg sink | Custom image on `confluentinc/cp-kafka-connect` (AvroConverter built in) + Debezium Postgres plugin + Iceberg sink zip (not published as an artifact — built from the Iceberg source in a multi-stage Dockerfile) |
 | Kafka (+ Zookeeper) | Carries Avro events | Already in `compose/infra.yml` |
 | Schema Registry | Stores Avro schemas, checks compatibility | Already in `compose/infra.yml` |
-| MinIO + Iceberg | Bronze: append-only change events | Already in the stack |
+| RustFS (S3) + Iceberg | Bronze: append-only change events | Already in the stack (`rustfs/rustfs:1.0.4`, replaced MinIO) |
 | Polaris | Iceberg REST catalog for bronze | Already in the stack (OAuth2, scope `PRINCIPAL_ROLE:ALL`) |
 | Trino | SQL over bronze (inspection, debugging, test scenarios) | Already in the stack; not on the main data path |
-| PySpark | Bronze → silver (SCD Type 2) | Existing Spark cluster, submitted via REST 6066 |
-| Postgres (silver, Postgres 16) | Silver tables, also the web app's database | Database `data-platform` (`POSTGRES_DB`) on the existing `postgres` service, next to `airflow` and `polaris` |
+| PySpark | Bronze → silver (SCD Type 2) | Existing Spark cluster, submitted via REST 6066; `spark.master` is set in `spark-defaults.conf` so REST jobs get real executors; driver/executor logs land in Grafana (`service=spark-job`) |
+| Postgres (silver, Postgres 16) | Silver tables, also the web app's database | Database `data-platform` (`POSTGRES_DB`) on the existing `postgres` service, next to `airflow` and `polaris`; Airflow reaches it as `postgres_conn` |
 | ClickHouse | Gold (OLAP): stores the gold tables, serves Superset and the API | Single node |
-| dbt-clickhouse | Silver → gold | Runs in the Airflow containers (`./dbt`); replaces the current dbt-spark pin — check it resolves against the Airflow 2.9.2 constraints |
+| dbt-clickhouse | Silver → gold | Runs in the Airflow containers (`./dbt`); added to `airflow/requirements.txt` in the gold phase — check it resolves against the Airflow 2.9.2 constraints |
 | Superset | Dashboards | Custom image adding the `clickhouse-connect` driver (not in the stock image) |
 | Elasticsearch 7.17 | Search for the web app | Already in `compose/infra.yml`; Python client must be `elasticsearch` 7.x (8.x refuses a 7.x server) |
 | FastAPI | The web app's only read path | ES for search, silver for detail/history, gold for numbers |
 | Airflow | Orchestrates the batch steps | Manual trigger only; runs light tasks itself (SQL on Postgres, the ES sync); heavy transforms run in Spark and dbt |
-| Grafana + Loki + Alloy | Container logs | Already in the stack |
+| Grafana + Loki + Alloy | Logs of every container (Docker json-file logs) and of Spark jobs | Already in the stack; every service starts only after Alloy is healthy, so no log line is missed |
+
+All services share one bridge network, `lakehouse`, and reach each other by service name
+(`kafka:29092`, `http://polaris:8181`, `postgres:5432`, …); host ports and the Airflow connections
+are listed in [services.md](services.md).
 
 ## 3. Source
 
@@ -259,10 +264,11 @@ Sink connector config:
   "iceberg.catalog.credential": "root:${env:POLARIS_SECRET}",
   "iceberg.catalog.scope": "PRINCIPAL_ROLE:ALL",
   "iceberg.catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
-  "iceberg.catalog.s3.endpoint": "http://minio:9000",
+  "iceberg.catalog.s3.endpoint": "${env:S3_ENDPOINT}",
   "iceberg.catalog.s3.path-style-access": "true",
-  "iceberg.catalog.s3.access-key-id": "${env:MINIO_ROOT_USER}",
-  "iceberg.catalog.s3.secret-access-key": "${env:MINIO_ROOT_PASSWORD}"
+  "iceberg.catalog.s3.access-key-id": "${env:S3_ACCESS_KEY}",
+  "iceberg.catalog.s3.secret-access-key": "${env:S3_SECRET_KEY}",
+  "iceberg.catalog.client.region": "${env:S3_REGION}"
 }
 ```
 
@@ -428,7 +434,8 @@ a single static HTML page served by the API.
 **Airflow — DAG `platform_pipeline`, `schedule=None`, triggered by hand:**
 
 1. `silver_spark` — submit `job_silver.py` via Spark REST 6066.
-2. `silver_apply` — run the SCD2 SQL (§6.4) on Postgres and advance the checkpoint.
+2. `silver_apply` — run the SCD2 SQL (§6.4) on Postgres through `postgres_conn` and advance the
+   checkpoint.
 3. In parallel: `sync_es` and `dbt run` + `dbt test` on ClickHouse.
 
 Bronze is not an Airflow step: the Iceberg sink writes it continuously.

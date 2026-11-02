@@ -1,46 +1,131 @@
-// Tail the stdout/stderr of every container in this compose project and push it to Loki.
-
-discovery.docker "containers" {
-  host = "unix:///var/run/docker.sock"
-
-  // Only this stack (compose project = repo directory name), not other containers on the host.
-  filter {
-    name   = "label"
-    values = ["com.docker.compose.project=lakehouse-project"]
-  }
+// --- Container logs -----------------------------------------------------------------------------
+// Tail Docker's own json-file logs instead of asking the Docker API: the daemon writes every
+// container's stdout/stderr to /var/lib/docker/containers/<id>/<id>-json.log (mounted read-only
+// here), and the file outlives the container. So nothing is missed — not even a one-shot *-setup
+// job that exits in half a second, which API discovery (running containers only, polled) can't
+// catch. Each line carries the compose project/service because every service sets
+// `logging: *default-logging` (json-file option `labels`) in compose/*.yml.
+// Requires native Docker Engine in WSL (Docker Desktop keeps these files inside its own VM).
+local.file_match "containers" {
+  path_targets = [{"__path__" = "/var/lib/docker/containers/*/*-json.log"}]
+  sync_period  = "1s"
 }
 
-// Labels used in Grafana: container (e.g. spark-master), service (compose service) and stream.
-discovery.relabel "containers" {
-  targets = []
-
-  rule {
-    source_labels = ["__meta_docker_container_name"]
-    regex         = "/(.*)"
-    target_label  = "container"
-  }
-
-  rule {
-    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    target_label  = "service"
-  }
-
-  rule {
-    source_labels = ["__meta_docker_container_log_stream"]
-    target_label  = "stream"
-  }
+loki.source.file "containers" {
+  targets    = local.file_match.containers.targets
+  forward_to = [loki.process.containers.receiver]
 }
 
-loki.source.docker "containers" {
-  host          = "unix:///var/run/docker.sock"
-  targets       = discovery.docker.containers.targets
-  relabel_rules = discovery.relabel.containers.rules
-  labels        = {"job" = "docker"}
-  forward_to    = [loki.write.local.receiver]
+// Labels used in Grafana: job="docker", service and container (= compose service; every
+// container_name equals its service name here), stream (stdout/stderr).
+loki.process "containers" {
+  // read the compose labels Docker added under "attrs" before stage.docker replaces the line
+  stage.json {
+    expressions = {
+      project = "attrs.\"com.docker.compose.project\"",
+      service = "attrs.\"com.docker.compose.service\"",
+    }
+  }
+
+  // {"log": ..., "stream": ..., "time": ...} -> line = log, label stream, timestamp = time
+  stage.docker { }
+
+  stage.static_labels {
+    values = {"job" = "docker"}
+  }
+
+  stage.labels {
+    values = {
+      project   = "",
+      service   = "",
+      container = "service",
+    }
+  }
+
+  // only this stack: drop other projects and containers started outside compose (no labels)
+  stage.match {
+    selector            = "{job=\"docker\", project!=\"lakehouse-project\"}"
+    action              = "drop"
+    drop_counter_reason = "not_this_project"
+  }
+
+  stage.label_drop {
+    values = ["project", "filename"]
+  }
+
+  forward_to = [loki.write.local.receiver]
 }
 
 loki.write "local" {
   endpoint {
     url = "http://loki:3100/loki/api/v1/push"
   }
+}
+
+// --- Spark job logs ----------------------------------------------------------------------------
+// In cluster mode the driver and executors run inside spark-worker and write stdout/stderr to
+// files in its work dir (volume spark_work_vol, mounted here at /spark-work), not to the
+// container's stdout — so the Docker source above never sees them.
+//   /spark-work/driver-<id>/stdout|stderr          driver
+//   /spark-work/app-<id>/<executor>/stdout|stderr  executors
+local.file_match "spark_jobs" {
+  path_targets = [
+    {"__path__" = "/spark-work/driver-*/std*"},
+    {"__path__" = "/spark-work/app-*/*/std*"},
+  ]
+  sync_period = "10s"
+}
+
+// Labels used in Grafana: service="spark-job", spark_id (driver-… / app-…), role, executor, stream.
+discovery.relabel "spark_jobs" {
+  targets = local.file_match.spark_jobs.targets
+
+  rule {
+    target_label = "service"
+    replacement  = "spark-job"
+  }
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = "/spark-work/((?:driver|app)-[^/]+)/.*"
+    target_label  = "spark_id"
+  }
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = "/spark-work/driver-.*"
+    target_label  = "role"
+    replacement   = "driver"
+  }
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = "/spark-work/app-[^/]+/([0-9]+)/.*"
+    target_label  = "executor"
+  }
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = "/spark-work/app-.*"
+    target_label  = "role"
+    replacement   = "executor"
+  }
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = ".*/(stdout|stderr)"
+    target_label  = "stream"
+  }
+}
+
+loki.source.file "spark_jobs" {
+  targets    = discovery.relabel.spark_jobs.output
+  forward_to = [loki.process.spark_jobs.receiver]
+}
+
+loki.process "spark_jobs" {
+  stage.static_labels {
+    values = {"job" = "spark"}
+  }
+  forward_to = [loki.write.local.receiver]
 }

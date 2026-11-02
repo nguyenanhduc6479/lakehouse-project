@@ -6,17 +6,22 @@ x-airflow-common: &airflow-common
   restart: on-failure
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB_AIRFLOW}
+    # the 'airflow' role owns the 'airflow' DB (created by postgres-setup) — no superuser needed
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_ADMIN_USERNAME}:${AIRFLOW_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB_AIRFLOW}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    # must be identical on webserver and scheduler, otherwise the UI can't fetch task logs
+    # served by the scheduler (403 "Could not read served logs")
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-    TZ: Asia/Ho_Chi_Minh
-    # MinIO credentials for tasks that touch object storage — from .env
-    MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-    MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    MINIO_BUCKET: ${MINIO_BUCKET}
+    TZ: ${TZ}
+    # S3 (RustFS) credentials for tasks that touch object storage — from .env
+    S3_ENDPOINT: ${S3_ENDPOINT}
+    S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+    S3_SECRET_KEY: ${S3_SECRET_KEY}
+    S3_BUCKET: ${S3_BUCKET}
+    S3_REGION: ${S3_REGION}
   volumes:
     - ../airflow/dags:/opt/airflow/dags
     - ../airflow/plugins:/opt/airflow/plugins
@@ -24,10 +29,22 @@ x-airflow-common: &airflow-common
     - airflow_logs_vol:/opt/airflow/logs
   networks: [lakehouse]
 
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
+    logging: *default-logging
     # wait for postgres-setup to create the 'airflow' database before running db migrate
     depends_on:
       postgres-setup:
@@ -40,10 +57,6 @@ services:
       # spark REST (cluster mode)
       SPARK_REST_HOST: spark-master
       SPARK_REST_PORT: 6066
-      # minio
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       # postgres
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -63,6 +76,7 @@ services:
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow-webserver
+    logging: *default-logging
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -79,6 +93,7 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     container_name: airflow-scheduler
+    logging: *default-logging
     depends_on:
       airflow-init:
         condition: service_completed_successfully

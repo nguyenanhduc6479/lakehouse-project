@@ -1,9 +1,5 @@
-# dbt-spark uses PyHive to reach the Spark Thrift Server in pure Python, no Java needed
-dbt-core==1.8.0
-dbt-spark[PyHive]==1.8.0
-
 # airflow providers
 apache-airflow-providers-http==4.11.1          # calls the Spark REST API (cluster mode)
-apache-airflow-providers-amazon==8.24.0        # MinIO / S3
+apache-airflow-providers-amazon==8.24.0        # S3 (RustFS)
 apache-airflow-providers-postgres==5.11.1      # PostgreSQL
 apache-airflow-providers-trino==5.7.1          # Trino ad-hoc queries

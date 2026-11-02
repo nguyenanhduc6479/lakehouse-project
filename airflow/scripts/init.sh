@@ -29,20 +29,20 @@ airflow connections add spark_rest_conn \
 airflow connections get spark_rest_conn
 echo "spark_rest_conn done."
 
-# --- minio_conn ---
-: "${MINIO_ROOT_USER:?Missing MINIO_ROOT_USER}"
-: "${MINIO_ROOT_PASSWORD:?Missing MINIO_ROOT_PASSWORD}"
-: "${MINIO_ENDPOINT:?Missing MINIO_ENDPOINT}"
+# --- s3_conn (RustFS, S3-compatible) ---
+: "${S3_ACCESS_KEY:?Missing S3_ACCESS_KEY}"
+: "${S3_SECRET_KEY:?Missing S3_SECRET_KEY}"
+: "${S3_ENDPOINT:?Missing S3_ENDPOINT}"
+: "${S3_REGION:?Missing S3_REGION}"
 
-airflow connections delete minio_conn 2>/dev/null || true
-airflow connections add minio_conn \
+airflow connections delete s3_conn 2>/dev/null || true
+airflow connections add s3_conn \
   --conn-type aws \
-  --conn-host "$MINIO_ENDPOINT" \
-  --conn-login "$MINIO_ROOT_USER" \
-  --conn-password "$MINIO_ROOT_PASSWORD" \
-  --conn-extra "{\"endpoint_url\": \"$MINIO_ENDPOINT\"}"
-airflow connections get minio_conn
-echo "minio_conn done."
+  --conn-login "$S3_ACCESS_KEY" \
+  --conn-password "$S3_SECRET_KEY" \
+  --conn-extra "{\"endpoint_url\": \"$S3_ENDPOINT\", \"region_name\": \"$S3_REGION\"}"
+airflow connections get s3_conn
+echo "s3_conn done."
 
 # --- postgres_conn ---
 : "${POSTGRES_USER:?Missing POSTGRES_USER}"
@@ -68,10 +68,12 @@ echo "postgres_conn done."
 : "${TRINO_PORT:?Missing TRINO_PORT}"
 
 airflow connections delete trino_conn 2>/dev/null || true
+# Trino has no password auth here but rejects requests without a user name (HTTP 401)
 airflow connections add trino_conn \
   --conn-type trino \
   --conn-host "$TRINO_HOST" \
   --conn-port "$TRINO_PORT" \
+  --conn-login airflow \
   --conn-schema "lakehouse"
 airflow connections get trino_conn
 echo "trino_conn done."

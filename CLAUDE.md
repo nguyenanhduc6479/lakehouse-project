@@ -11,7 +11,7 @@ phase); build order and per-phase checks: **`docs/roadmap.md`** (keep its Status
 ```
 generator.py → source-db (Postgres, wal_level=logical)
   → Debezium (Kafka Connect, Avro + Schema Registry) → Kafka topics src.shop.*
-  → Iceberg sink → lakehouse.bronze.*_cdc   (append-only change events, Polaris catalog, MinIO)
+  → Iceberg sink → lakehouse.bronze.*_cdc   (append-only change events, Polaris catalog, RustFS)
   → PySpark SCD2 → Postgres `data-platform`.silver.*   (history; also the web app DB)
   → dbt-clickhouse → ClickHouse gold → Superset
   → batch sync → Elasticsearch → FastAPI → web page
@@ -32,18 +32,22 @@ no HA, replicas, poolers or TLS.
 
 - **Clean slate (2026-11-02).** The previous vnstock OHLCV medallion pipeline, its tests, the old
   `docs/system-overview.*` and the whole DataHub layer were removed. What remains is reusable
-  infra: Postgres, Zookeeper + Kafka, Schema Registry, Elasticsearch, MinIO, Polaris, Spark,
+  infra: Postgres, Zookeeper + Kafka, Schema Registry, Elasticsearch, RustFS (S3), Polaris, Spark,
   Trino, Airflow, Grafana/Loki/Alloy. Roadmap phase 1 of the design doc is done; phase 2 has
   started: the `source-db` instance exists (no schema, CDC role/publication or generator yet).
-- `docker compose config` merges cleanly (23 services). On 2026-11-02 the stack was torn down with
-  `down -v --remove-orphans` (all containers and volumes, incl. DataHub leftovers, removed) and only
-  `postgres` + `postgres-setup` + `source-db` were brought back up and verified; the rest of the
-  stack has not been re-run since DataHub was removed.
-- `spark/jobs/helper.py` (`get_spark`) builds a SparkSession wired to Polaris + MinIO — reuse it
+- **Runtime-validated 2026-11-02 on native Docker Engine 29.9.2 in WSL** (from empty volumes,
+  `build` + `up -d`): all 21 services come up (16 running, all healthy except Loki which has no
+  healthcheck; 5 one-shot jobs `Exited (0)`); every host port answers. A REST-submitted Spark job
+  runs on a real executor and its driver/executor logs reach Loki. Verified: Trino and Spark (`helper.get_spark`) both create/read/drop
+  an Iceberg table through Polaris into the `data-platform` bucket on RustFS (re-verified after the
+  MinIO → RustFS swap; `rustfs-setup` is idempotent; Airflow `s3_conn` sees the bucket); Airflow connects to its DB as the
+  `airflow` role; Kafka has transaction-log RF 1. Network verified (TCP to every service port +
+  app-level checks from Airflow, Kafka, Schema Registry, Spark worker); recipe in `docs/services.md`.
+- `spark/jobs/helper.py` (`get_spark`) builds a SparkSession wired to Polaris + RustFS (S3) — reuse it
   for every Spark job. `airflow/plugins/spark_rest.py` (`submit_and_wait`) submits a job via the
   Spark REST API. `airflow/dags/` is empty. `tests/` has only `conftest.py` (a local Spark fixture).
-- `dbt/` still holds an empty `dbt_project.yml` and a dbt-spark profile; it becomes dbt-clickhouse
-  in the gold phase.
+- `dbt/` holds only an empty `dbt_project.yml`; dbt-clickhouse (profile + models) arrives in the
+  gold phase. `spark-thrift` and dbt-spark were removed (2026-11-02) — nothing uses Spark over JDBC.
 - **Python versions differ by place:** the `custom-spark` image runs **Python 3.8.10** (code must
   stay 3.8-compatible at runtime — `from __future__ import annotations` is what makes `str | None`
   hints OK), Airflow is 3.11, the host `venv/` is 3.11.
@@ -69,41 +73,75 @@ the others by service name. All credentials and tunables live in `.env` and are 
   slot WAL retention (`max_slot_wal_keep_size=1GB`) are instance-wide. `POSTGRES_*` only apply when
   a volume is first initialised — after changing them, recreate the volume (`down -v`).
 - **Shared infra** (`compose/infra.yml`): Zookeeper + Kafka (cp 7.6.0,
-  in-network listener `kafka:29092`, topic auto-create on). **Schema Registry** (cp 7.6.0,
+  in-network listener `kafka:29092`, topic auto-create on; offsets **and transaction-state** topics
+  at RF 1 — the transaction log defaults to RF 3, which would break every transactional producer,
+  e.g. the Iceberg sink's exactly-once commits). **Schema Registry** (cp 7.6.0,
   `http://schema-registry:8081`, internal only). **Elasticsearch 7.17** single node, security off
   (internal only) — the search layer.
-- **Storage** (`compose/storage.yml`): MinIO (console 9001). One-shot `minio-setup` runs
-  `minio/scripts/init.sh` to create bucket `lakehouse` with `bronze/`, `silver/`, `gold/` prefixes
-  (skips if `/data/lakehouse` exists).
+- **Storage** (`compose/storage.yml`): **RustFS 1.0.4** (`rustfs/rustfs`, Apache 2.0, S3 API on
+  9000, console on 9001 at `/rustfs/console/`). It replaced MinIO on 2026-11-02 because MinIO stopped
+  publishing images. Config via `S3_*` in `.env` (`S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`,
+  `S3_BUCKET`, `S3_REGION`) — every engine reads these names, so swapping the store again only
+  touches `storage.yml`. Path-style only (no `RUSTFS_SERVER_DOMAINS`); the region is ignored by
+  RustFS but required by AWS SDK clients. `RUSTFS_OBS_LOG_DIRECTORY: ""` sends logs to stdout (the
+  image default writes files under `/logs`, invisible to Alloy/Loki). Health: `GET :9000/health`.
+  One-shot `rustfs-setup` (`amazon/aws-cli:2.39.3`) runs `rustfs/scripts/init.sh`: HEAD the bucket,
+  create it only if missing. One bucket, `data-platform`; Iceberg tables land under
+  `s3://data-platform/<namespace>/<table>`. Note: the bucket is `data-platform`, but the Polaris
+  *catalog* (and Trino catalog / Spark `CATALOG`) is still named `lakehouse`.
 - **Catalog** (`compose/catalog.yml`): **Apache Polaris 1.5.0** — Iceberg **REST** catalog at
   `http://polaris:8181/api/catalog`, **OAuth2 client-credentials** (`root` / `${POLARIS_SECRET}`,
   scope `PRINCIPAL_ROLE:ALL`), persisted in Postgres via
   **`POLARIS_PERSISTENCE_TYPE=relational-jdbc`** (without it Polaris silently runs in-memory and
   loses everything on restart). Chain: `postgres-setup` → `polaris-bootstrap` → `polaris` →
   `polaris-setup`. Health on management port **8182** (container-only). `polaris/scripts/init.sh`
-  creates the `lakehouse` catalog (MinIO endpoint, `pathStyleAccess`, `stsUnavailable=true`,
+  creates the `lakehouse` catalog (base location `s3://${S3_BUCKET}/`, RustFS endpoint,
+  `pathStyleAccess`, `stsUnavailable=true`,
   `polaris.config.drop-with-purge.enabled=true`), grants `CATALOG_MANAGE_CONTENT` to
   `catalog_admin`, and creates namespaces `bronze`/`silver`/`gold` via the Iceberg REST API. No
-  credential vending: every engine brings its own MinIO keys.
+  credential vending: every engine brings its own S3 keys.
 - **Processing** (`compose/spark.yml`): Spark 3.5.1 from `spark/Dockerfile` (`custom-spark:3.5.1`:
   hadoop-aws, `iceberg-spark-runtime` + `iceberg-aws-bundle` 1.5.2, Postgres JDBC, kafka-clients).
   `spark-master` (RPC 7077, UI 8090, REST 6066), `spark-worker` (UI 8081, size from
-  `SPARK_WORKER_CORES`/`SPARK_WORKER_MEMORY`), `spark-thrift` (10000, UI 4040; capped at
-  `spark.cores.max=1` + 512m — without the cap it takes every core and REST-submitted jobs wait
-  forever). Jobs in `./spark/jobs` → `/opt/spark/jobs`, `PYTHONPATH=/opt/spark/jobs`. Event logs go
-  to `spark_events_vol` (no history server; Grafana is used for logs).
+  `SPARK_WORKER_CORES`/`SPARK_WORKER_MEMORY`). Jobs in `./spark/jobs` → `/opt/spark/jobs`, `PYTHONPATH=/opt/spark/jobs`. Event logs are
+  **off** (nothing read them; no History Server). `spark-defaults.conf` sets
+  **`spark.master=spark://spark-master:7077`** — without it every REST (6066) submit silently runs
+  in `local[*]` inside the driver (the worker launches `SparkSubmit <app>` with no `--master` and
+  SparkSubmit ignores the `-Dspark.master` the REST payload becomes; symptom: "Starting executor ID
+  driver", no `app-*` dir). Verified 2026-11-02: a REST-submitted job now gets a real executor.
+  Driver/executor stdout+stderr of cluster-mode jobs are files in the worker's `/opt/spark/work`
+  (`driver-<id>/`, `app-<id>/<executor>/`), on volume `spark_work_vol`; the dir is created in the
+  image owned by `spark`, so the fresh volume inherits it (no chown job). Worker cleanup deletes
+  finished apps' dirs after 7 days (`SPARK_WORKER_OPTS`). **Config files are bind-mounted one file
+  at a time**: after editing `spark-defaults.conf`, use `docker compose up -d --force-recreate
+  spark-master spark-worker` — a plain `restart` fails ("error mounting ... no such file") because
+  the editor replaced the file's inode.
 - **Query** (`compose/trino.yml`): **Trino 454** (8080), Iceberg connector on Polaris
-  (`trino/catalog/lakehouse.properties`) + native S3 to MinIO. 454 is the minimum: it is the first
+  (`trino/catalog/lakehouse.properties`) + native S3 to RustFS. 454 is the minimum: it is the first
   version with `iceberg.rest-catalog.oauth2.scope` (435 fails with `invalid_scope`).
 - **Orchestration** (`compose/airflow.yml`): Airflow 2.9.2, LocalExecutor, `custom-airflow:2.9.2`
   from `airflow/Dockerfile` (+ `airflow/requirements.txt`, installed against the 2.9.2
-  constraints). UI on **8085**. **Spark jobs are submitted in cluster mode through the Spark
+  constraints). UI on **8085**. Its metadata DB is reached as the `airflow` role (owner of DB
+  `airflow`), not the superuser; `AIRFLOW__WEBSERVER__SECRET_KEY` is shared by webserver and
+  scheduler (otherwise the UI gets 403 reading task logs). **Spark jobs are submitted in cluster mode through the Spark
   Standalone REST API** (`spark-master:6066`), not a `spark://` connection.
 - **Logs** (`compose/monitoring.yml`, config in `./monitoring`): **Grafana 13.2.3** (3000) reading
-  **Loki 3.7.8** (internal, 7-day retention), fed by **Grafana Alloy v1.20.1** tailing this
-  project's containers via the Docker socket (labels `container`, `service`, `stream`). Loki is
-  distroless, so `alloy`'s healthcheck probes both via bash `/dev/tcp` (`CMD bash -c`, not
-  `CMD-SHELL`). Alloy only sees running containers.
+  **Loki 3.7.8** (internal, 7-day retention), fed by **Grafana Alloy v1.20.1**, which tails
+  **Docker's json-file logs** (`/var/lib/docker/containers/*/*-json.log`, mounted read-only — no
+  docker.sock) for `job="docker"` (labels `service`, `container` (= service), `stream`), filtered to
+  compose project `lakehouse-project` via the compose labels Docker writes into each line (json-file
+  option `labels`, set by `logging: *default-logging` on every service). File tailing catches even
+  one-shot jobs that exit in <1 s (`postgres-setup` runs ~0.5 s) — Docker-API discovery lists running
+  containers only and missed them. Verified 2026-11-02: Loki line counts equal `docker logs` for every
+  container. Requires native Docker Engine (Desktop keeps those files in its VM). **Startup is
+  gated on Alloy:** every root service (`postgres`, `source-db`, `zookeeper`, `elasticsearch`,
+  `rustfs`, `spark-master`) `depends_on: alloy: service_healthy`, so everything starts after log
+  shipping (Alloy's healthcheck also probes Loki; `start_interval: 2s` avoids a 30 s first-probe
+  wait). Alloy also tails Spark job log files from `spark_work_vol` mounted read-only at `/spark-work`
+  (`job="spark"`, `service="spark-job"`, labels `spark_id`, `role`=driver|executor, `executor`,
+  `stream`; lines arrive within ~10 s). The "Container logs" dashboard queries `job=~"docker|spark"`.
+  Loki is distroless, so `alloy`'s healthcheck probes both via bash `/dev/tcp` (`CMD bash -c`, not
+  `CMD-SHELL`).
 
 To be added by the roadmap: the generator, Kafka Connect (Debezium + Iceberg sink,
 `confluentinc/cp-kafka-connect` which already has the AvroConverter), ClickHouse, Superset,
@@ -111,9 +149,13 @@ FastAPI.
 
 ## Common commands
 
-All from the repo root, **inside WSL** (Docker Desktop → WSL Integration must be on; a shell
-opened before that lacks the `docker` group → `permission denied ... docker.sock` — open a new
-shell or `newgrp docker`, don't `chmod` the socket):
+All from the repo root (where `docker-compose.yml` and `.env` live — not from `compose/`),
+**inside WSL**. Docker is the **native Docker Engine** in the Ubuntu WSL distro (docker-ce from
+Docker's apt repo, started by systemd with WSL), **not Docker Desktop** — switched 2026-11-02;
+Desktop's WSL integration is off and its `~/.docker` leftovers were moved to
+`~/.docker-desktop-leftovers`. If a shell says `/mnt/c/Program Files/Docker/...: No such file`,
+it cached the old Desktop binary: `hash -r` or open a new shell. Ports published by containers are
+reachable from Windows on `localhost` (WSL2 forwarding), e.g. DataGrip on 5432/5433:
 
 ```bash
 docker compose config            # validate/merge the included compose files — first sanity check
@@ -125,8 +167,7 @@ docker compose down              # named volumes persist
 ```
 
 Docker Hub's CDN intermittently drops large layer downloads (`httpReadSeeker ... EOF`) — retry.
-Don't run a blanket `docker compose pull`: it also tries the local-only `custom-*` images and
-`minio/minio` (Docker Hub reports "repository does not exist"; the locally cached image runs).
+Don't run a blanket `docker compose pull`: it also tries the local-only `custom-*` images.
 
 `spark-submit` is not on the container PATH — use `/opt/spark/bin/spark-submit`, e.g.
 `docker compose exec spark-master /opt/spark/bin/spark-submit --py-files /opt/spark/jobs/helper.py /opt/spark/jobs/<job>.py`.
@@ -155,9 +196,8 @@ Catalog check: `docker exec trino trino --execute "SHOW SCHEMAS FROM lakehouse"`
 
 ### Key ports (host)
 
-MinIO 9000 / console 9001 · Polaris 8181 (unauthenticated `GET :8181/api/catalog/v1/config` → 401
-means it's up) · Spark master UI 8090, RPC 7077, REST 6066 · Spark worker 8081 · Spark Thrift
-10000, UI 4040 · Trino 8080 · Airflow 8085 · Grafana 3000 · Postgres 5432 · source-db 5433. **Not published**:
+RustFS S3 9000 / console 9001 · Polaris 8181 (unauthenticated `GET :8181/api/catalog/v1/config` → 401
+means it's up) · Spark master UI 8090, RPC 7077, REST 6066 · Spark worker 8081 · Trino 8080 · Airflow 8085 · Grafana 3000 · Postgres 5432 · source-db 5433. **Not published**:
 Loki 3100, Alloy 12345, Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200, Schema Registry 8081
 — Kafka's `PLAINTEXT_HOST://localhost:9092` listener is unreachable from the host until a `ports:`
 entry is added.
@@ -166,19 +206,25 @@ entry is added.
 
 - **Airflow connections are created in code, not the UI.** `airflow/scripts/init.sh` (run by
   `airflow-init`) migrates the DB, ensures the admin user, and delete-then-adds `spark_rest_conn`,
-  `minio_conn`, `postgres_conn`, `trino_conn` from `.env`. Add new connections there.
+  `s3_conn` (RustFS), `postgres_conn` (→ `data-platform`), `trino_conn` (user `airflow`: Trino
+  rejects requests without a user, HTTP 401) from `.env`. Add new connections there.
 - **One-shot setup jobs** (`*-setup`) do idempotent initialisation (DBs, buckets, catalogs; later
   Debezium/sink connector registration). Never trust `curl -s` exit codes — it returns 0 on HTTP
   4xx/5xx; capture `%{http_code}` and fail loudly (see `req`/`die` in `polaris/scripts/init.sh`).
-- **Permission fix-up pattern**: containers run as different UIDs (Spark 185, …). A busybox
-  `spark-fix-permissions` job `chown`s `spark_events_vol` first. Follow it for any new non-root
-  service writing to a named volume.
+- **Volume ownership pattern**: containers run as different UIDs (Spark 185, RustFS 10001, …). A
+  fresh named volume copies the owner of the mount-point directory *if that directory exists in
+  the image* — so create it in the Dockerfile with the right owner (see `/opt/spark/work` in
+  `spark/Dockerfile`) instead of adding a chown job. Only works for new/empty volumes.
 - **Healthcheck-gated startup**: use `condition: service_healthy` /
   `service_completed_successfully` in `depends_on`, so the chain doesn't race.
+- **Every new service** gets `logging: *default-logging` (each `compose/*.yml` defines the
+  `x-logging` anchor; anchors don't cross `include`) — without it Alloy drops its logs — and must
+  wait for `alloy` (directly if it has no other dependency, otherwise through its dependencies).
 - Everything in the repo — code, comments, docstrings, logs, scripts, `.env` comments, docs — is in
   **English**. Only exception: `docs/roadmap.vi.md`, a Vietnamese copy of `docs/roadmap.md` the
   user asked for — update both together.
-- Timezone `Asia/Ho_Chi_Minh` (`TZ`) everywhere.
+- Timezone: every long-running service gets `TZ: ${TZ}` (`.env`, `Asia/Ho_Chi_Minh`); for Postgres it
+  also sets the server `timezone` at initdb. One-shot setup jobs don't need it.
 - Each `compose/*.yml` re-declares the `lakehouse` network and its own `volumes:` so it stays
   independently mergeable.
 
@@ -187,7 +233,7 @@ entry is added.
 - New service → the matching `compose/*.yml` module (create one and add it to `include:` if
   needed), join `lakehouse`, read config from `.env`, gate startup with healthchecks.
 - New engine on the catalog → `http://polaris:8181/api/catalog`, OAuth2 credential **and scope
-  `PRINCIPAL_ROLE:ALL`**, warehouse `lakehouse`, plus the engine's own MinIO S3 settings. Don't
+  `PRINCIPAL_ROLE:ALL`**, warehouse `lakehouse`, plus the engine's own S3 settings (`S3_*`, path-style). Don't
   introduce Nessie/Hive-metastore/JDBC-catalog config.
 - **Polaris 1.5.0 quirks (docs disagree):** `admin-tool bootstrap` is not idempotent (2nd run →
   exit 3; `polaris-bootstrap` treats that as success); re-adding an existing grant → **HTTP 500

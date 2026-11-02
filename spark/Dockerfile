@@ -23,7 +23,11 @@ RUN curl -L -o /opt/spark/jars/hadoop-aws-3.3.4.jar https://repo1.maven.org/mave
 # --- kafka client (matches Confluent CP 7.6) ---
  && curl -L -o /opt/spark/jars/kafka-clients-3.6.0.jar https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.6.0/kafka-clients-3.6.0.jar \
  && chmod 644 /opt/spark/jars/*.jar
- 
+
+# Worker work dir (driver/executor stdout+stderr in cluster mode). Created here, owned by spark, so a
+# fresh named volume mounted on it inherits that ownership — no chown job needed.
+RUN mkdir -p /opt/spark/work && chown spark:spark /opt/spark/work
+
 USER spark
  
 ENV PYTHONPATH=/opt/spark/jobs

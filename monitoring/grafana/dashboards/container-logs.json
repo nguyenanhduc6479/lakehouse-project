@@ -14,7 +14,7 @@
         "label": "Service",
         "type": "query",
         "datasource": { "type": "loki", "uid": "loki" },
-        "query": { "type": 1, "label": "service", "stream": "{job=\"docker\"}", "refId": "service" },
+        "query": { "type": 1, "label": "service", "stream": "{job=~\"docker|spark\"}", "refId": "service" },
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -41,7 +41,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\"$service\"} |~ \"(?i)$search\" [$__auto]))",
+          "expr": "sum by (service) (count_over_time({job=~\"docker|spark\", service=~\"$service\"} |~ \"(?i)$search\" [$__auto]))",
           "legendFormat": "{{service}}"
         }
       ],
@@ -60,7 +60,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sort_desc(sum by (service) (count_over_time({job=\"docker\", service=~\"$service\"} |~ \"(?i)(error|exception|fatal)\" [$__range])))",
+          "expr": "sort_desc(sum by (service) (count_over_time({job=~\"docker|spark\", service=~\"$service\"} |~ \"(?i)(error|exception|fatal)\" [$__range])))",
           "legendFormat": "{{service}}",
           "queryType": "instant"
         }
@@ -83,7 +83,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{job=\"docker\", service=~\"$service\"} |~ \"(?i)$search\""
+          "expr": "{job=~\"docker|spark\", service=~\"$service\"} |~ \"(?i)$search\""
         }
       ],
       "options": {

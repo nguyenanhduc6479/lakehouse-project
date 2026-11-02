@@ -1,29 +1,38 @@
-services:
-  # runs once before spark-thrift starts to fix ownership of spark_events_vol
-  # (a freshly created named volume is owned by root; the spark user UID 185 needs write access)
-  spark-fix-permissions:
-    image: busybox
-    container_name: spark-fix-permissions
-    command: ["sh", "-c", "chown -R 185:185 /opt/spark/eventlogs"]
-    volumes:
-      - spark_events_vol:/opt/spark/eventlogs
-    networks: [lakehouse]
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
 
+services:
   spark-master:
     build:
       context: ../spark
       dockerfile: Dockerfile
     image: custom-spark:3.5.1
     container_name: spark-master
+    logging: *default-logging
+    depends_on:
+      # start only once log shipping works, so Alloy -> Loki captures this service (and everything
+      # that depends on it) from its first line; Alloy's healthcheck also probes Loki
+      alloy:
+        condition: service_healthy
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     environment:
       SPARK_MASTER_HOST: spark-master
       SPARK_MASTER_OPTS: "-Dspark.master.rest.enabled=true -Dspark.master.rest.port=6066"
-      # config read by jobs in helper.py (Polaris REST catalog + MinIO) — from .env
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_BUCKET: ${MINIO_BUCKET}
+      TZ: ${TZ}
+      # config read by jobs in helper.py (Polaris REST catalog + RustFS S3) — from .env
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
       POLARIS_SECRET: ${POLARIS_SECRET}
       POLARIS_URI: http://polaris:8181/api/catalog
     ports:
@@ -33,7 +42,6 @@ services:
     volumes:
       - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
       - ../spark/jobs:/opt/spark/jobs
-      - spark_events_vol:/opt/spark/eventlogs
     networks: [lakehouse]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080 || exit 1"]
@@ -45,19 +53,24 @@ services:
   spark-worker:
     image: custom-spark:3.5.1
     container_name: spark-worker
-    # the driver runs on the worker (cluster mode), so it needs Polaris/MinIO env for helper.py
+    logging: *default-logging
+    # the driver runs on the worker (cluster mode), so it needs Polaris/S3 env for helper.py
     environment:
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_BUCKET: ${MINIO_BUCKET}
+      TZ: ${TZ}
+      # delete work dirs of finished applications after 7 days (checked every 30 min)
+      SPARK_WORKER_OPTS: "-Dspark.worker.cleanup.enabled=true -Dspark.worker.cleanup.interval=1800 -Dspark.worker.cleanup.appDataTtl=604800"
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
       POLARIS_SECRET: ${POLARIS_SECRET}
       POLARIS_URI: http://polaris:8181/api/catalog
     command:
       - "/opt/spark/bin/spark-class"
       - "org.apache.spark.deploy.worker.Worker"
       - "spark://spark-master:7077"
-      # sized in .env; must fit the capped thrift app + one pipeline job (driver + executor)
+      # sized in .env; must fit one pipeline job (driver + executor, cluster mode)
       - "--cores"
       - "${SPARK_WORKER_CORES}"
       - "--memory"
@@ -70,7 +83,8 @@ services:
     volumes:
       - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
       - ../spark/jobs:/opt/spark/jobs
-      - spark_events_vol:/opt/spark/eventlogs
+      # driver-*/ and app-*/<executor>/ stdout+stderr of cluster-mode jobs; Alloy tails it (read-only)
+      - spark_work_vol:/opt/spark/work
     networks: [lakehouse]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081 || exit 1"]
@@ -79,57 +93,8 @@ services:
       retries: 5
       start_period: 20s
 
-  spark-thrift:
-    image: custom-spark:3.5.1
-    container_name: spark-thrift
-    command:
-      - "/opt/spark/sbin/start-thriftserver.sh"
-      - "--master"
-      - "spark://spark-master:7077"
-      - "--hiveconf"
-      - "hive.server2.thrift.port=10000"
-      - "--hiveconf"
-      - "hive.server2.thrift.bind.host=0.0.0.0"
-      # The thrift server is a long-running app; without a cap Standalone hands it every
-      # worker core, so pipeline jobs submitted via REST 6066 would wait forever for one.
-      - "--conf"
-      - "spark.cores.max=1"
-      - "--conf"
-      - "spark.executor.memory=512m"
-    environment:
-      SPARK_NO_DAEMONIZE: "true"    # run in the foreground so the container doesn't exit
-      # prepared for the later dbt phase (thrift still needs the catalog config in
-      # spark-defaults.conf before it can use Iceberg — not done in this pipeline)
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_BUCKET: ${MINIO_BUCKET}
-      POLARIS_SECRET: ${POLARIS_SECRET}
-      POLARIS_URI: http://polaris:8181/api/catalog
-    depends_on:
-      spark-master:
-        condition: service_healthy
-      spark-fix-permissions:
-        condition: service_completed_successfully
-    ports:
-      - "10000:10000"    # JDBC for dbt-spark
-      - "4040:4040"      # Spark UI of the thrift app
-    volumes:
-      - ../spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
-      - spark_events_vol:/opt/spark/eventlogs
-    networks: [lakehouse]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4040 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
-
-  # spark-history was replaced by Grafana + Loki (compose/monitoring.yml). Event logs are still
-  # written to spark_events_vol, so a history server can be added back without losing data.
-
 volumes:
-  spark_events_vol:
+  spark_work_vol:
 
 networks:
   lakehouse:

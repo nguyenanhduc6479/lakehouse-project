@@ -2,10 +2,27 @@
 # (infra.yml) on purpose: wal_level=logical and the replication slot's WAL retention apply to the
 # whole instance, and CDC experiments (stopping Debezium, schema changes, resets) must not touch
 # Airflow/Polaris/silver.
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
   source-db:
     image: postgres:16
     container_name: source-db
+    logging: *default-logging
+    depends_on:
+      # start only once log shipping works, so Alloy -> Loki captures this service (and everything
+      # that depends on it) from its first line; Alloy's healthcheck also probes Loki
+      alloy:
+        condition: service_healthy
     command:
       - "postgres"
       - "-c"
@@ -17,7 +34,7 @@ services:
       POSTGRES_USER: ${SOURCE_POSTGRES_USER}
       POSTGRES_PASSWORD: ${SOURCE_POSTGRES_PASSWORD}
       POSTGRES_DB: ${SOURCE_POSTGRES_DB}
-      TZ: Asia/Ho_Chi_Minh
+      TZ: ${TZ}
     ports: ["5433:5432"]      # 5433 on host: 5432 is the shared postgres
     volumes:
       - source_db_data_vol:/var/lib/postgresql/data

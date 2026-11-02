@@ -1,39 +1,68 @@
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
-  minio:
-    image: minio/minio
-    container_name: minio
-    ports: ["9000:9000", "9001:9001"]
+  # RustFS: S3-compatible object store (Apache 2.0), replacing MinIO, which stopped publishing
+  # images. Single node, path-style only (no RUSTFS_SERVER_DOMAINS), console on 9001.
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    container_name: rustfs
+    logging: *default-logging
+    depends_on:
+      # start only once log shipping works, so Alloy -> Loki captures this service (and everything
+      # that depends on it) from its first line; Alloy's healthcheck also probes Loki
+      alloy:
+        condition: service_healthy
+    ports:
+      - "9000:9000"      # S3 API
+      - "9001:9001"      # console: http://localhost:9001/rustfs/console/
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      TZ: Asia/Ho_Chi_Minh
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+      RUSTFS_REGION: ${S3_REGION}
+      RUSTFS_CONSOLE_ENABLE: "true"
+      # empty -> logs go to stdout (the image default /logs writes files Alloy/Loki can't see)
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+      TZ: ${TZ}
     volumes:
-      - minio_data_vol:/data
+      # /data is owned by the image's rustfs user (10001); a fresh named volume inherits that
+      - rustfs_data_vol:/data
     networks: [lakehouse]
-    command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
       interval: 30s
       timeout: 20s
       retries: 3
+      start_period: 10s
 
-  minio-setup:
-    image: minio/mc
-    container_name: minio-setup
+  rustfs-setup:
+    image: amazon/aws-cli:2.39.3
+    container_name: rustfs-setup
+    logging: *default-logging
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      TZ: Asia/Ho_Chi_Minh
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${S3_REGION}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
     volumes:
-      - ../minio/scripts/init.sh:/init.sh
+      - ../rustfs/scripts/init.sh:/init.sh:ro
     entrypoint: ["/bin/sh", "/init.sh"]
     networks: [lakehouse]
 
 volumes:
-  minio_data_vol:
+  rustfs_data_vol:
 
 networks:
   lakehouse:

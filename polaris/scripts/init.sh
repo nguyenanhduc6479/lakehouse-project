@@ -9,8 +9,10 @@ BASE="http://${POLARIS_HOST}:${POLARIS_PORT}"
 MGMT="${BASE}/api/management/v1"
 # Namespaces belong to the Iceberg REST API (prefix = catalog name), NOT the Management API.
 REST="${BASE}/api/catalog/v1/lakehouse"
-# MinIO ignores region, but the AWS SDK (Polaris + clients) requires one.
+# RustFS ignores region, but the AWS SDK (Polaris + clients) requires one.
 S3_REGION="${S3_REGION:-us-east-1}"
+: "${S3_BUCKET:?Missing S3_BUCKET}"
+: "${S3_ENDPOINT:?Missing S3_ENDPOINT}"
 
 # req METHOD URL [JSON] -> body in /tmp/resp, HTTP code in $CODE
 req() {
@@ -38,21 +40,21 @@ echo "Token acquired."
 
 # --- catalog ---
 # Fields per Polaris 1.5.0 AwsStorageConfigInfo (spec/polaris-management-service.yml):
-# - endpoint + pathStyleAccess: point at MinIO, path-style is mandatory.
-# - stsUnavailable=true: MinIO here has no STS -> Polaris vends no credentials, the server
+# - endpoint + pathStyleAccess: point at RustFS, path-style is mandatory.
+# - stsUnavailable=true: RustFS here has no STS -> Polaris vends no credentials, the server
 #   reads/writes metadata with AWS_* env (see compose/catalog.yml), clients use their own keys.
-# MinIO keys are NOT part of storageConfigInfo (the spec has no such field).
+# S3 keys are NOT part of storageConfigInfo (the spec has no such field).
 STORAGE="{
   \"storageType\": \"S3\",
-  \"allowedLocations\": [\"s3://lakehouse/\"],
-  \"endpoint\": \"${MINIO_ENDPOINT}\",
+  \"allowedLocations\": [\"s3://${S3_BUCKET}/\"],
+  \"endpoint\": \"${S3_ENDPOINT}\",
   \"pathStyleAccess\": true,
   \"stsUnavailable\": true,
   \"region\": \"${S3_REGION}\"
 }"
 # drop-with-purge: defaults to false -> Trino `DROP TABLE` (always sends purgeRequested=true) gets
 # 403 DROP_TABLE_WITH_PURGE. Enabled at catalog level (FeatureConfiguration, Polaris 1.5.0).
-PROPS='{"default-base-location": "s3://lakehouse/", "polaris.config.drop-with-purge.enabled": "true"}'
+PROPS="{\"default-base-location\": \"s3://${S3_BUCKET}/\", \"polaris.config.drop-with-purge.enabled\": \"true\"}"
 
 req POST "${MGMT}/catalogs" "{\"catalog\": {
   \"name\": \"lakehouse\",

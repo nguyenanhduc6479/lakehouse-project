@@ -1,3 +1,14 @@
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # The relational-jdbc backend REQUIRES bootstrapping schema + realm with admin-tool before
   # starting the server (Polaris 1.5.0 docs: metastores/relational-jdbc.md).
@@ -7,6 +18,7 @@ services:
   polaris-bootstrap:
     image: apache/polaris-admin-tool:1.5.0
     container_name: polaris-bootstrap
+    logging: *default-logging
     depends_on:
       postgres-setup:
         condition: service_completed_successfully
@@ -32,6 +44,7 @@ services:
   polaris:
     image: apache/polaris:1.5.0
     container_name: polaris
+    logging: *default-logging
     depends_on:
       # wait for bootstrap to create schema/realm in the 'polaris' database (after postgres-setup)
       polaris-bootstrap:
@@ -46,11 +59,12 @@ services:
       quarkus.datasource.username: ${POLARIS_ADMIN_USERNAME}
       quarkus.datasource.password: ${POLARIS_ADMIN_PASSWORD}
       quarkus.datasource.db-kind: postgresql
-      # The catalog sets stsUnavailable=true (MinIO has no STS) -> Polaris reads/writes
-      # metadata.json on MinIO itself via the default AWS credential chain, so it needs keys + region.
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      AWS_REGION: us-east-1
+      # The catalog sets stsUnavailable=true (no STS) -> Polaris reads/writes metadata.json on
+      # RustFS itself via the default AWS credential chain, so it needs keys + region.
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_REGION: ${S3_REGION}
+      TZ: ${TZ}
     ports: ["8181:8181"]
     networks: [lakehouse]
     healthcheck:
@@ -64,20 +78,21 @@ services:
   polaris-setup:
     image: alpine:3.19
     container_name: polaris-setup
+    logging: *default-logging
     depends_on:
       polaris:
         condition: service_healthy
-      # wait for minio-setup to create the bucket before registering the location with Polaris
-      minio-setup:
+      # wait for rustfs-setup to create the bucket before registering the location with Polaris
+      rustfs-setup:
         condition: service_completed_successfully
     environment:
       POLARIS_HOST: polaris
       POLARIS_PORT: 8181
       POLARIS_CLIENT_ID: root
       POLARIS_CLIENT_SECRET: ${POLARIS_SECRET}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
     volumes:
       - ../polaris/scripts:/scripts
     command: ["sh", "-c", "apk add --no-cache curl && sh /scripts/init.sh"]

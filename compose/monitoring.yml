@@ -1,13 +1,26 @@
-# Container log monitoring: Alloy tails every container of this compose project through the
-# Docker API and pushes to Loki; Grafana reads Loki (datasource + dashboard are provisioned).
+# Container log monitoring: Alloy tails the Docker json-file logs of every container of this
+# compose project (and Spark job log files) and pushes them to Loki; Grafana reads Loki
+# (datasource + dashboard are provisioned).
 # Alloy rather than Promtail: Promtail is end-of-life and Grafana points to Alloy as its successor.
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
 services:
   loki:
     image: grafana/loki:3.7.8
     container_name: loki
+    logging: *default-logging
     command: ["-config.file=/etc/loki/loki.yaml"]
     environment:
-      TZ: Asia/Ho_Chi_Minh
+      TZ: ${TZ}
     volumes:
       - ../monitoring/loki/loki.yaml:/etc/loki/loki.yaml:ro
       - loki_data_vol:/loki
@@ -18,19 +31,22 @@ services:
   alloy:
     image: grafana/alloy:v1.20.1
     container_name: alloy
+    logging: *default-logging
     command:
       - "run"
       - "/etc/alloy/config.alloy"
       - "--storage.path=/var/lib/alloy/data"
       - "--server.http.listen-addr=0.0.0.0:12345"
     environment:
-      TZ: Asia/Ho_Chi_Minh
+      TZ: ${TZ}
     volumes:
       - ../monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
-      # Docker API access to discover containers and read their logs. Note: the socket grants
-      # full control of the Docker daemon (":ro" does not restrict the API) — local use only.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Docker's json-file container logs (native Docker Engine in WSL); read-only, no Docker API
+      # access needed any more (the old docker.sock mount gave full control of the daemon)
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - alloy_data_vol:/var/lib/alloy/data
+      # Spark worker work dir: logs of cluster-mode drivers/executors are files, not container stdout
+      - spark_work_vol:/spark-work:ro
     depends_on:
       loki:
         condition: service_started
@@ -53,12 +69,16 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+      # probe every 2s during start_period: every root service waits for alloy to be healthy, and
+      # without this Docker runs the first check only after `interval` (30s)
+      start_interval: 2s
 
   grafana:
     image: grafana/grafana:13.2.3
     container_name: grafana
+    logging: *default-logging
     environment:
-      TZ: Asia/Ho_Chi_Minh
+      TZ: ${TZ}
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -82,6 +102,8 @@ services:
       start_period: 30s
 
 volumes:
+  # declared in compose/spark.yml; repeated so this module stays independently mergeable
+  spark_work_vol:
   loki_data_vol:
   alloy_data_vol:
   grafana_data_vol:

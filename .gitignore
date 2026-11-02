@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------------------
 # Reason: .env holds every credential (POSTGRES_PASSWORD, POLARIS_SECRET,
-# API_KEY, MINIO_ROOT_PASSWORD...). NEVER push it to git.
+# S3_SECRET_KEY...). NEVER push it to git.
 # ---------------------------------------------------------------------------
 .env
 .env.*
