@@ -33,10 +33,19 @@ no HA, replicas, poolers or TLS.
 - **Clean slate (2026-11-02).** The previous vnstock OHLCV medallion pipeline, its tests, the old
   `docs/system-overview.*` and the whole DataHub layer were removed. What remains is reusable
   infra: Postgres, Zookeeper + Kafka, Schema Registry, Elasticsearch, RustFS (S3), Polaris, Spark,
-  Trino, Airflow, Grafana/Loki/Alloy. Roadmap phase 1 of the design doc is done; phase 2 is under
-  way: `source-db` exists and `source/schema.sql` (schema `shop`, 3 tables, triggers, publication
-  `dbz_publication`, role `debezium`) is applied by the one-shot `source-db-setup` job — verified
-  idempotent and CDC-ready (2026-11-02). Still missing: `generator.py`.
+  Trino, Airflow, Grafana/Loki/Alloy. Roadmap phases 1 and 2 are **done**
+  (2026-11-02): `source/schema.sql` (schema `shop`, 3 tables, triggers, publication
+  `dbz_publication`, role `debezium`) is applied by the one-shot `source-db-setup` job (idempotent,
+  CDC-ready), and `source/generator.py` fills it continuously. **Next: phase 3 (CDC — Kafka
+  Connect + Debezium).**
+- **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
+  3.3): compose profile `generator`, so a plain `up` never starts it. Rate `GENERATOR_RATE` (`.env`).
+  Pitfalls already fixed — keep them: the psycopg connection must be `autocommit=True` (otherwise
+  the first statement opens an implicit transaction, every `conn.transaction()` becomes a savepoint
+  and nothing commits until exit — invisible to Debezium); Faker 40.44 `vi_VN.first_name()` only
+  returns "John"/"Jane", use `first_name_male()`/`first_name_female()`; Python as PID 1 ignores
+  SIGTERM unless handled (it is). `faker` + `psycopg[binary]` are also in the host `dev` group for
+  `tests/test_generator.py` — keep both pins in sync with `source/requirements.txt`.
 - **Runtime-validated 2026-11-02 on native Docker Engine 29.9.2 in WSL** (from empty volumes,
   `build` + `up -d`): all services come up (16 running, all healthy except Loki which has no
   healthcheck; the one-shot jobs `Exited (0)` — 22 services incl. `source-db-setup`); every host port answers. A REST-submitted Spark job
@@ -145,7 +154,7 @@ the others by service name. All credentials and tunables live in `.env` and are 
   Loki is distroless, so `alloy`'s healthcheck probes both via bash `/dev/tcp` (`CMD bash -c`, not
   `CMD-SHELL`).
 
-To be added by the roadmap: the generator, Kafka Connect (Debezium + Iceberg sink,
+To be added by the roadmap: Kafka Connect (Debezium + Iceberg sink,
 `confluentinc/cp-kafka-connect` which already has the AvroConverter), ClickHouse, Superset,
 FastAPI.
 
@@ -170,6 +179,14 @@ docker compose down              # named volumes persist
 
 Docker Hub's CDN intermittently drops large layer downloads (`httpReadSeeker ... EOF`) — retry.
 Don't run a blanket `docker compose pull`: it also tries the local-only `custom-*` images.
+
+Generator (profile `generator`; `docker compose build` without the profile skips it):
+
+```bash
+docker compose --profile generator build generator
+docker compose --profile generator up -d generator   # start writing into source-db
+docker compose stop generator                        # stop (clean, ~1 s)
+```
 
 `spark-submit` is not on the container PATH — use `/opt/spark/bin/spark-submit`, e.g.
 `docker compose exec spark-master /opt/spark/bin/spark-submit --py-files /opt/spark/jobs/helper.py /opt/spark/jobs/<job>.py`.

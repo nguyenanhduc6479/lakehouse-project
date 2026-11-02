@@ -82,7 +82,15 @@ Run once at startup and exit; they have no port and no UI: `postgres-setup`, `so
 `polaris-bootstrap`, `polaris-setup`, `airflow-init`.
 `airflow-scheduler` is a long-running backend process, also without a UI or port.
 
+## On demand (compose profile `generator`)
+
+Not started by `docker compose up`; not counted in the 22 services above.
+
+| Service | Role | Start / stop |
+|---|---|---|
+| `generator` | Writes shop activity into `source-db` (`GENERATOR_RATE` events/s, default 2) | `docker compose --profile generator up -d generator` / `docker compose stop generator` |
+
 ## Not built yet
 
-Planned by the [roadmap](roadmap.md), ports not assigned yet: generator, Kafka Connect
-(Debezium + Iceberg sink), ClickHouse, Superset, FastAPI + web page. Add them here when they land.
+Planned by the [roadmap](roadmap.md), ports not assigned yet: Kafka Connect (Debezium + Iceberg
+sink), ClickHouse, Superset, FastAPI + web page. Add them here when they land.

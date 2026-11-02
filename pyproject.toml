@@ -9,6 +9,8 @@ requires-python = ">=3.11"
 # on the same Spark version as production.
 [dependency-groups]
 dev = [
+    "faker==40.44.0",
+    "psycopg[binary]==3.3.6",
     "pyspark==3.5.1",
     "pytest>=8.0",
     "pytest-mock>=3.12",
@@ -16,9 +18,10 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# Let pytest import the job modules (spark/jobs) and Airflow plugins (airflow/plugins) directly
+# Let pytest import the job modules (spark/jobs), Airflow plugins (airflow/plugins) and the data
+# generator (source/generator.py) directly
 # without installing them as a package.
-pythonpath = ["spark/jobs", "airflow/plugins"]
+pythonpath = ["spark/jobs", "airflow/plugins", "source"]
 testpaths = ["tests"]
 # Marker 'spark' = test needs a SparkSession/JVM. On a Windows host (python workers often hit
 # "Accept timed out") run the rest with:  uv run pytest -m "not spark"

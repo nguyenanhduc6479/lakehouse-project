@@ -143,6 +143,16 @@ Nó là một service Compose nằm dưới một profile, được bật/tắt 
 (`docker compose --profile generator up -d generator`), nên stack có thể chạy mà không sinh dữ
 liệu mới.
 
+Triển khai (`source/generator.py`, image `custom-generator`): mỗi nhịp chọn một hành động theo
+tỉ trọng — tạo đơn 45 %, chuyển trạng thái đơn 30 %, sửa user 10 %, tạo user 8 %, xóa đơn 4 %,
+khóa/mở khóa user 3 % — với tốc độ `GENERATOR_RATE` event/giây; lúc khởi động nó tạo trước 20 user.
+Họ tên lấy từ Faker `vi_VN`; thành phố, sản phẩm (17 SKU thuộc 7 nhóm) và số điện thoại lấy từ danh
+sách cố định, để dữ liệu sạch. Hai chi tiết quan trọng cho CDC: kết nối chạy ở chế độ
+**autocommit**, nên mỗi hành động là một transaction được commit riêng (nếu không, transaction ngầm
+của psycopg biến mọi hành động thành savepoint và không có gì được commit cho tới khi generator
+dừng); và nó xử lý `SIGTERM` (chạy làm PID 1 thì mặc định sẽ bỏ qua tín hiệu này), nên
+`docker compose stop` dừng gọn sau hành động đang chạy.
+
 ## 4. Event: Avro + Schema Registry
 
 ### 4.1. Vì sao dùng Avro

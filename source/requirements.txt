@@ -1,0 +1,4 @@
+# Runtime deps of generator.py (image custom-generator). Keep in sync with the dev group in
+# pyproject.toml, which installs the same versions on the host for tests/test_generator.py.
+faker==40.44.0
+psycopg[binary]==3.3.6

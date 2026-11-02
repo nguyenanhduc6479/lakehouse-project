@@ -74,6 +74,31 @@ services:
       - 'psql -v ON_ERROR_STOP=1 -v debezium_password="$$DEBEZIUM_PASSWORD" -f /sql/schema.sql && echo "source-db schema applied"'
     networks: [lakehouse]
 
+  # Simulated shop activity (source/generator.py). Under a profile, so a plain `up` never starts
+  # it — run it by hand:  docker compose --profile generator up -d generator   (stop: `stop generator`)
+  # Build:  docker compose --profile generator build generator
+  generator:
+    build:
+      context: ../source
+      dockerfile: Dockerfile
+    image: custom-generator:0.1.0
+    container_name: generator
+    logging: *default-logging
+    profiles: ["generator"]
+    restart: on-failure
+    depends_on:
+      source-db-setup:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: source-db
+      PGPORT: "5432"
+      PGUSER: ${SOURCE_POSTGRES_USER}
+      PGPASSWORD: ${SOURCE_POSTGRES_PASSWORD}
+      PGDATABASE: ${SOURCE_POSTGRES_DB}
+      TZ: ${TZ}
+    command: ["--rate", "${GENERATOR_RATE}"]
+    networks: [lakehouse]
+
 volumes:
   source_db_data_vol:
 

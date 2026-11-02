@@ -7,7 +7,7 @@ Mỗi phase kết thúc bằng một thứ nhìn thấy được là đang chạ
 | # | Phase | Trạng thái |
 |---|---|---|
 | 1 | Dọn sạch | Xong |
-| 2 | Nguồn | Đang làm |
+| 2 | Nguồn | Xong |
 | 3 | CDC | Chưa bắt đầu |
 | 4 | Bronze | Chưa bắt đầu |
 | 5 | Silver | Chưa bắt đầu |
@@ -40,7 +40,7 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   (TCP + mức ứng dụng: các connection của Airflow, OAuth2 của Polaris, gửi/nhận Kafka, ghi Schema
   Registry); đã sửa `trino_conn` (thiếu user → HTTP 401).
 
-## Phase 2 — Nguồn *(đang làm)*
+## Phase 2 — Nguồn *(xong)*
 
 **Mục tiêu:** một database OLTP Postgres thay đổi liên tục và sẵn sàng cho CDC.
 
@@ -56,9 +56,13 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   (lần hai không thay đổi gì), `debezium` đăng nhập qua network bằng mật khẩu trong `.env`, tạo được
   logical slot và decode được thay đổi (UPDATE/DELETE mang đủ dòng cũ; xóa cascade ra hai DELETE
   trong cùng một transaction).
-- [ ] `generator.py` (Python + Faker + psycopg, `--rate` event/giây): tạo đơn hàng trong một
-  transaction, chuyển trạng thái đơn, cập nhật/khóa user, thỉnh thoảng xóa đơn.
-- [ ] Service Compose `generator` trong profile `generator` (bật/tắt bằng tay).
+- [x] `source/generator.py` (Python 3.12 + Faker 40.44 + psycopg 3.3, `--rate` event/giây):
+  tạo đơn hàng trong một transaction, chuyển trạng thái đơn, tạo/cập nhật/khóa user, thỉnh thoảng
+  xóa đơn. Các hàm thuần có unit test (`tests/test_generator.py`, chạy trên host).
+- [x] Service Compose `generator` (image `custom-generator:0.1.0`) trong profile `generator` (bật/tắt
+  bằng tay), tốc độ lấy từ `GENERATOR_RATE` trong `.env`. Đã kiểm tra 2026-11-02: số dòng tăng liên
+  tục (~8 đơn / 10 giây ở rate 2), mọi `total_amount` bằng tổng các dòng, không để transaction treo,
+  `docker compose stop` dừng gọn trong ~1 giây, log lên Grafana.
 
 **Hoàn thành khi:**
 - `docker compose --profile generator up -d generator` → số dòng trong `shop.*` tăng liên tục khi

@@ -7,7 +7,7 @@ Each phase ends with something you can see working; don't start a phase before t
 | # | Phase | Status |
 |---|---|---|
 | 1 | Clean slate | Done |
-| 2 | Source | In progress |
+| 2 | Source | Done |
 | 3 | CDC | Not started |
 | 4 | Bronze | Not started |
 | 5 | Silver | Not started |
@@ -40,7 +40,7 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   (TCP + app-level: Airflow connections, Polaris OAuth2, Kafka round-trip, Schema Registry write);
   `trino_conn` fixed (it had no user → HTTP 401).
 
-## Phase 2 — Source *(in progress)*
+## Phase 2 — Source *(done)*
 
 **Goal:** a Postgres OLTP database that changes continuously and is ready for CDC.
 
@@ -56,9 +56,13 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   (second run changes nothing), `debezium` logs in over the network with the `.env` password and
   can create a logical slot and decode changes (UPDATE/DELETE carry the full old row; a cascaded
   delete gives two DELETEs in one transaction).
-- [ ] `generator.py` (Python + Faker + psycopg, `--rate` events/second): create orders in one
-  transaction, move statuses forward, update/lock users, occasionally delete an order.
-- [ ] `generator` Compose service under profile `generator` (started and stopped by hand).
+- [x] `source/generator.py` (Python 3.12 + Faker 40.44 + psycopg 3.3, `--rate` events/second):
+  create orders in one transaction, move statuses forward, create/update/lock users, occasionally
+  delete an order. Pure helpers unit-tested (`tests/test_generator.py`, host).
+- [x] `generator` Compose service (image `custom-generator:0.1.0`) under profile `generator`
+  (started and stopped by hand), rate from `GENERATOR_RATE` in `.env`. Verified 2026-11-02: rows
+  grow live (~8 orders / 10 s at rate 2), every `total_amount` equals the sum of its lines, no
+  transaction left open, `docker compose stop` exits cleanly in ~1 s, logs reach Grafana.
 
 **Done when:**
 - `docker compose --profile generator up -d generator` → row counts in `shop.*` keep growing in

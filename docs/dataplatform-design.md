@@ -138,6 +138,16 @@ script reads `:'debezium_password'` (quoted safely; psql does not substitute var
 It is a Compose service under a profile, started and stopped by hand
 (`docker compose --profile generator up -d generator`), so the stack can run without new data.
 
+Implementation (`source/generator.py`, image `custom-generator`): each tick picks a weighted
+action — create order 45 %, advance order 30 %, update user 10 %, create user 8 %, delete order
+4 %, lock/unlock user 3 % — at `GENERATOR_RATE` events/s; it first seeds 20 users. Names come from
+Faker `vi_VN`; cities, products (17 SKUs in 7 categories) and phone numbers from fixed lists, so
+the data stays clean. Two details that matter for CDC: the connection runs in **autocommit** mode,
+so every action is its own committed transaction (without it, psycopg's implicit transaction
+turns every action into a savepoint and nothing is committed until the generator stops); and it
+handles `SIGTERM` (as PID 1 it would otherwise ignore it), so `docker compose stop` ends cleanly
+after the current action.
+
 ## 4. Events: Avro + Schema Registry
 
 ### 4.1. Why Avro
