@@ -1,33 +1,53 @@
 {
   "uid": "lakehouse-container-logs",
   "title": "Container logs",
-  "tags": ["lakehouse", "logs"],
+  "tags": [
+    "lakehouse",
+    "logs"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "service",
         "label": "Service",
         "type": "query",
-        "datasource": { "type": "loki", "uid": "loki" },
-        "query": { "type": 1, "label": "service", "stream": "{job=~\"docker|spark\"}", "refId": "service" },
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "query": {
+          "type": 1,
+          "label": "service",
+          "stream": "{job=~\"docker|spark\"}",
+          "refId": "service"
+        },
         "refresh": 2,
         "sort": 1,
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
-        "current": { "text": "All", "value": "$__all" }
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
       },
       {
         "name": "search",
         "label": "Search (regex, case-insensitive)",
         "type": "textbox",
         "query": "",
-        "current": { "text": "", "value": "" }
+        "current": {
+          "text": "",
+          "value": ""
+        }
       }
     ]
   },
@@ -36,8 +56,16 @@
       "id": 1,
       "type": "timeseries",
       "title": "Log lines per service",
-      "gridPos": { "h": 7, "w": 16, "x": 0, "y": 0 },
-      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
       "targets": [
         {
           "refId": "A",
@@ -46,44 +74,43 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } },
-        "overrides": []
-      },
-      "options": { "legend": { "displayMode": "list", "placement": "right" } }
-    },
-    {
-      "id": 2,
-      "type": "bargauge",
-      "title": "Error/exception lines (time range)",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 0 },
-      "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sort_desc(sum by (service) (count_over_time({job=~\"docker|spark\", service=~\"$service\"} |~ \"(?i)(error|exception|fatal)\" [$__range])))",
-          "legendFormat": "{{service}}",
-          "queryType": "instant"
-        }
-      ],
-      "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 100 } ] }
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
         },
         "overrides": []
       },
-      "options": { "displayMode": "basic", "orientation": "horizontal", "showUnfilled": true }
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right"
+        }
+      }
     },
     {
-      "id": 3,
+      "id": 2,
       "type": "logs",
       "title": "Logs",
-      "gridPos": { "h": 20, "w": 24, "x": 0, "y": 7 },
-      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Each line starts with its service (Spark job logs: spark-job/driver or spark-job/executor-<n>). Expand a line for all its labels.",
+      "gridPos": {
+        "h": 20,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
       "targets": [
         {
           "refId": "A",
-          "expr": "{job=~\"docker|spark\", service=~\"$service\"} |~ \"(?i)$search\""
+          "expr": "{job=~\"docker|spark\", service=~\"$service\"} |~ \"(?i)$search\" | line_format `{{ printf \"%-20s\" (print .service (and .role (print \"/\" .role)) (and .executor (print \"-\" .executor))) }} | {{ __line__ }}`"
         }
       ],
       "options": {

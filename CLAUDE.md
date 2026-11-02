@@ -53,9 +53,9 @@ no HA, replicas, poolers or TLS.
   hints OK), Airflow is 3.11, the host `venv/` is 3.11.
 - **All `container_name`s are fixed**, so only one copy of this stack can exist per Docker host.
   Volumes are `lakehouse-project_*`.
-- **Under git.** Remote `lakehouse` → `https://github.com/nguyenanhduc6479/lakehouse-project.git`;
-  `dev` is the working branch, `main` the default. An older remote `origin` → `my-project.git` also
-  exists. `.env` and `.claude/settings.local.json` are gitignored — keep it that way.
+- **Under git.** One remote, `origin` → `git@github.com:nguyenanhduc6479/lakehouse-project.git`
+  (SSH); `dev` is the working branch (tracks `origin/dev`), `main` the default. `.env` and
+  `.claude/settings.local.json` are gitignored — keep it that way.
 
 ## Architecture (what exists now)
 
