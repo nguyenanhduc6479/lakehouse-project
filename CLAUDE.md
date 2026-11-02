@@ -33,11 +33,13 @@ no HA, replicas, poolers or TLS.
 - **Clean slate (2026-11-02).** The previous vnstock OHLCV medallion pipeline, its tests, the old
   `docs/system-overview.*` and the whole DataHub layer were removed. What remains is reusable
   infra: Postgres, Zookeeper + Kafka, Schema Registry, Elasticsearch, RustFS (S3), Polaris, Spark,
-  Trino, Airflow, Grafana/Loki/Alloy. Roadmap phase 1 of the design doc is done; phase 2 has
-  started: the `source-db` instance exists (no schema, CDC role/publication or generator yet).
+  Trino, Airflow, Grafana/Loki/Alloy. Roadmap phase 1 of the design doc is done; phase 2 is under
+  way: `source-db` exists and `source/schema.sql` (schema `shop`, 3 tables, triggers, publication
+  `dbz_publication`, role `debezium`) is applied by the one-shot `source-db-setup` job — verified
+  idempotent and CDC-ready (2026-11-02). Still missing: `generator.py`.
 - **Runtime-validated 2026-11-02 on native Docker Engine 29.9.2 in WSL** (from empty volumes,
-  `build` + `up -d`): all 21 services come up (16 running, all healthy except Loki which has no
-  healthcheck; 5 one-shot jobs `Exited (0)`); every host port answers. A REST-submitted Spark job
+  `build` + `up -d`): all services come up (16 running, all healthy except Loki which has no
+  healthcheck; the one-shot jobs `Exited (0)` — 22 services incl. `source-db-setup`); every host port answers. A REST-submitted Spark job
   runs on a real executor and its driver/executor logs reach Loki. Verified: Trino and Spark (`helper.get_spark`) both create/read/drop
   an Iceberg table through Polaris into the `data-platform` bucket on RustFS (re-verified after the
   MinIO → RustFS swap; `rustfs-setup` is idempotent; Airflow `s3_conn` sees the bucket); Airflow connects to its DB as the
@@ -211,6 +213,13 @@ entry is added.
 - **One-shot setup jobs** (`*-setup`) do idempotent initialisation (DBs, buckets, catalogs; later
   Debezium/sink connector registration). Never trust `curl -s` exit codes — it returns 0 on HTTP
   4xx/5xx; capture `%{http_code}` and fail loudly (see `req`/`die` in `polaris/scripts/init.sh`).
+- **SQL setup scripts take secrets as psql variables**, never hardcoded: the job passes
+  `.env` values with `psql -v ON_ERROR_STOP=1 -v name="$$ENV_VAR"` and the SQL reads `:'name'`.
+  psql doesn't substitute variables inside `DO $$ … $$`, and `CREATE ROLE`/`CREATE PUBLICATION`
+  have no `IF NOT EXISTS`, so create those idempotently with `SELECT format(...) WHERE NOT EXISTS
+  (...) \gexec` (see `source/schema.sql`, run by `source-db-setup`). In tests, connect over the
+  network (`-h source-db`), not `localhost` inside the container: the image trusts local logins,
+  so a wrong password would still pass.
 - **Volume ownership pattern**: containers run as different UIDs (Spark 185, RustFS 10001, …). A
   fresh named volume copies the owner of the mount-point directory *if that directory exists in
   the image* — so create it in the Dockerfile with the right owner (see `/opt/spark/work` in

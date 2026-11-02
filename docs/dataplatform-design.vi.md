@@ -91,9 +91,11 @@ Ba bảng trong schema `shop` của database `source-db` (DDL ở `source/schema
 
 | Bảng | Khóa chính | Cột chính |
 |---|---|---|
-| `shop.users` | `user_id` | email, họ tên, điện thoại, thành phố, trạng thái (active/locked/closed), `created_at`, `updated_at` |
-| `shop.orders` | `order_id` | `user_id`, trạng thái, phương thức thanh toán, `total_amount numeric(18,2)`, `ordered_at`, `updated_at` |
-| `shop.order_details` | `order_detail_id` | `order_id`, số dòng, sku, tên sản phẩm, số lượng, đơn giá, giảm giá, `line_total` |
+| `shop.users` | `user_id` | `email` (duy nhất), `full_name`, `phone`, `city`, `status` (active / locked / closed), `created_at`, `updated_at` |
+| `shop.orders` | `order_id` | `user_id`, `status` (pending / paid / shipped / completed / cancelled / refunded), `payment_method` (cod / card / bank_transfer / e_wallet), `shipping_city`, `total_amount numeric(18,2)`, `currency char(3)` (mặc định VND), `ordered_at`, `created_at`, `updated_at` |
+| `shop.order_details` | `order_detail_id` | `order_id`, `line_number` (duy nhất trong mỗi đơn), `sku`, `product_name`, `category`, `quantity`, `unit_price`, `discount_amount`, `line_total` (mọi cột tiền là `numeric(18,2)`), `created_at`, `updated_at` |
+
+Khóa chính là `bigint GENERATED ALWAYS AS IDENTITY`: generator không bao giờ tự đặt ID.
 
 Lựa chọn thiết kế:
 
@@ -112,9 +114,19 @@ Lựa chọn thiết kế:
   Debezium bị dừng không làm đầy ổ đĩa laptop. Vượt ngưỡng, Postgres vô hiệu hóa slot và Debezium
   phải snapshot lại — bản thân đó cũng là một kịch bản test (§10).
 - `REPLICA IDENTITY FULL` trên cả ba bảng, để event update/delete mang đầy đủ dòng cũ.
-- Publication `dbz_publication` chỉ gồm ba bảng, được tạo bởi init SQL (Debezium không được tự
-  tạo: mặc định của nó là `FOR ALL TABLES`, đòi quyền superuser).
-- Một user riêng `debezium` có `REPLICATION` và `SELECT` trên `shop`.
+- Publication `dbz_publication` chỉ gồm ba bảng, được tạo bởi `source/schema.sql` (Debezium không
+  được tự tạo: mặc định của nó là `FOR ALL TABLES`, đòi quyền superuser).
+- Một user riêng `debezium` có `LOGIN` + `REPLICATION` và `SELECT` trên `shop` (cả các bảng tạo sau
+  này, nhờ `ALTER DEFAULT PRIVILEGES`); mật khẩu là `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`.
+
+Toàn bộ phần này — schema, bảng, trigger, thiết lập CDC — nằm trong **`source/schema.sql`**, được
+job một lần **`source-db-setup`** (`compose/source.yml`, image `postgres:16`,
+`psql -v ON_ERROR_STOP=1`) áp dụng ở mỗi lần `up`. Script idempotent (`IF NOT EXISTS`,
+`CREATE OR REPLACE TRIGGER`, và `SELECT … WHERE NOT EXISTS … \gexec` cho publication và role, vì
+hai loại này không có `IF NOT EXISTS`). Mật khẩu Debezium đi vào SQL dưới dạng biến của psql:
+compose đưa `.env` vào container, job chạy `psql -v debezium_password="$DEBEZIUM_PASSWORD"`, và
+script đọc `:'debezium_password'` (được bọc nháy an toàn; psql không thay biến bên trong
+`DO $$ … $$`, nên mới dùng `\gexec`).
 
 ### 3.3. Generator
 
@@ -122,7 +134,8 @@ Lựa chọn thiết kế:
 
 - tạo một đơn hàng — trong **một transaction**: insert `orders`, insert 1–5 `order_details`, rồi
   update `orders.total_amount`;
-- chuyển trạng thái đơn hàng tiến lên (pending → paid → shipped → delivered, hoặc → cancelled);
+- chuyển trạng thái đơn hàng tiến lên (pending → paid → shipped → completed; hoặc → cancelled;
+  một đơn completed có thể chuyển sang refunded);
 - cập nhật một user (thành phố, điện thoại) hoặc khóa một user;
 - thỉnh thoảng xóa một đơn hàng (cascade xuống các dòng của nó).
 

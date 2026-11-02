@@ -7,7 +7,7 @@ Inside the Docker network every service is reached by its service name (e.g. `ka
 `http://polaris:8181`), not `localhost`. From Windows (DataGrip, browser) the host ports below are
 reachable on `localhost` too: Docker Engine runs inside WSL and WSL2 forwards published ports.
 
-The stack has 21 services: 16 long-running ones and 5 one-shot jobs (see the end of this page).
+The stack has 22 services: 16 long-running ones and 6 one-shot jobs (see the end of this page).
 
 ## Services with a UI
 
@@ -27,7 +27,7 @@ Backend services: no web UI, reached with a client (`psql`, S3 client, HTTP API,
 | Service | Host port(s) | How to connect | Notes |
 |---|---|---|---|
 | `postgres` (shared) | 5432 | `psql -h localhost -p 5432 -U $POSTGRES_USER data-platform` | Also holds the `airflow` and `polaris` DBs |
-| `source-db` (CDC source) | 5433 → 5432 | `psql -h localhost -p 5433 -U $SOURCE_POSTGRES_USER source-db` | `wal_level=logical` |
+| `source-db` (CDC source) | 5433 → 5432 | `psql -h localhost -p 5433 -U $SOURCE_POSTGRES_USER source-db` | `wal_level=logical`; schema `shop` + publication `dbz_publication`; Debezium logs in as `debezium` / `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD` |
 | RustFS S3 API | 9000 | `http://localhost:9000` (S3 endpoint, path-style) | Same keys as the console; one bucket, `S3_BUCKET` (`data-platform`); region `S3_REGION` |
 | Polaris (Iceberg REST catalog) | 8181 | `http://localhost:8181/api/catalog` | OAuth2 `root` / `POLARIS_SECRET`, scope `PRINCIPAL_ROLE:ALL`; an unauthenticated `GET /api/catalog/v1/config` → 401 means it is up |
 | Spark master RPC | 7077 | `spark://localhost:7077` | |
@@ -77,7 +77,8 @@ docker run --rm --network lakehouse-project_lakehouse alpine:3.19 sh -c \
 
 ## One-shot jobs
 
-Run once at startup and exit; they have no port and no UI: `postgres-setup`, `rustfs-setup`,
+Run once at startup and exit; they have no port and no UI: `postgres-setup`, `source-db-setup`
+(applies `source/schema.sql`), `rustfs-setup`,
 `polaris-bootstrap`, `polaris-setup`, `airflow-init`.
 `airflow-scheduler` is a long-running backend process, also without a UI or port.
 

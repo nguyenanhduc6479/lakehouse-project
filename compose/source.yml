@@ -45,6 +45,34 @@ services:
       timeout: 20s
       retries: 5
       start_period: 5s
+      # probe every 2s while starting, so source-db-setup doesn't wait a full `interval` (30s)
+      start_interval: 2s
+
+  # One-shot: applies source/schema.sql (schema shop, tables, triggers, publication, debezium role)
+  # on every `up`, then exits. The script is idempotent, so re-running it changes nothing. The
+  # Debezium password goes in as a psql variable (-v), read in SQL as :'debezium_password'.
+  source-db-setup:
+    image: postgres:16
+    container_name: source-db-setup
+    logging: *default-logging
+    depends_on:
+      source-db:
+        condition: service_healthy
+    environment:
+      PGHOST: source-db
+      PGPORT: "5432"
+      PGUSER: ${SOURCE_POSTGRES_USER}
+      PGPASSWORD: ${SOURCE_POSTGRES_PASSWORD}
+      PGDATABASE: ${SOURCE_POSTGRES_DB}
+      DEBEZIUM_PASSWORD: ${SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD}
+    volumes:
+      - ../source/schema.sql:/sql/schema.sql:ro
+    # $$ = a literal $ for the container's shell (compose would otherwise interpolate it)
+    command:
+      - "sh"
+      - "-c"
+      - 'psql -v ON_ERROR_STOP=1 -v debezium_password="$$DEBEZIUM_PASSWORD" -f /sql/schema.sql && echo "source-db schema applied"'
+    networks: [lakehouse]
 
 volumes:
   source_db_data_vol:

@@ -46,12 +46,16 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 
 - [x] Instance `source-db` (`compose/source.yml`): database `source-db`, port host 5433,
   `wal_level=logical`, `max_slot_wal_keep_size=1GB`.
-- [ ] `source/schema.sql`: schema `shop` gồm `users`, `orders`, `order_details` (design §3.1) —
+- [x] `source/schema.sql`: schema `shop` gồm `users`, `orders`, `order_details` (design §3.1) —
   trạng thái dùng `varchar` + `CHECK`, `line_total` là cột thường, trigger cập nhật `updated_at`,
   `ON DELETE CASCADE` trên `order_details.order_id`.
-- [ ] Cấu hình CDC (design §3.2), áp dụng bằng một job one-shot idempotent `source-db-setup`:
-  `REPLICA IDENTITY FULL` cho ba bảng, publication `dbz_publication`, role `debezium`
-  (`REPLICATION` + `SELECT` trên `shop`, mật khẩu `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`).
+- [x] Cấu hình CDC (design §3.2) nằm trong cùng script, áp dụng bằng job one-shot idempotent
+  `source-db-setup`: `REPLICA IDENTITY FULL` cho ba bảng, publication `dbz_publication`, role
+  `debezium` (`REPLICATION` + `SELECT` trên `shop`, mật khẩu lấy từ
+  `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD` qua biến của psql). Đã kiểm tra 2026-11-02: chạy hai lần
+  (lần hai không thay đổi gì), `debezium` đăng nhập qua network bằng mật khẩu trong `.env`, tạo được
+  logical slot và decode được thay đổi (UPDATE/DELETE mang đủ dòng cũ; xóa cascade ra hai DELETE
+  trong cùng một transaction).
 - [ ] `generator.py` (Python + Faker + psycopg, `--rate` event/giây): tạo đơn hàng trong một
   transaction, chuyển trạng thái đơn, cập nhật/khóa user, thỉnh thoảng xóa đơn.
 - [ ] Service Compose `generator` trong profile `generator` (bật/tắt bằng tay).

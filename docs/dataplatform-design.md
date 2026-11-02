@@ -87,9 +87,11 @@ because `user` and `order` are reserved words in PostgreSQL.
 
 | Table | Primary key | Main columns |
 |---|---|---|
-| `shop.users` | `user_id` | email, full name, phone, city, status (active/locked/closed), `created_at`, `updated_at` |
-| `shop.orders` | `order_id` | `user_id`, status, payment method, `total_amount numeric(18,2)`, `ordered_at`, `updated_at` |
-| `shop.order_details` | `order_detail_id` | `order_id`, line number, sku, product name, quantity, unit price, discount, `line_total` |
+| `shop.users` | `user_id` | `email` (unique), `full_name`, `phone`, `city`, `status` (active / locked / closed), `created_at`, `updated_at` |
+| `shop.orders` | `order_id` | `user_id`, `status` (pending / paid / shipped / completed / cancelled / refunded), `payment_method` (cod / card / bank_transfer / e_wallet), `shipping_city`, `total_amount numeric(18,2)`, `currency char(3)` (default VND), `ordered_at`, `created_at`, `updated_at` |
+| `shop.order_details` | `order_detail_id` | `order_id`, `line_number` (unique per order), `sku`, `product_name`, `category`, `quantity`, `unit_price`, `discount_amount`, `line_total` (all money `numeric(18,2)`), `created_at`, `updated_at` |
+
+Primary keys are `bigint GENERATED ALWAYS AS IDENTITY`: the generator never supplies IDs.
 
 Design choices:
 
@@ -108,9 +110,19 @@ Design choices:
   Debezium can't fill the laptop's disk. Past the cap Postgres invalidates the slot and Debezium
   has to re-snapshot — itself a test scenario (§10).
 - `REPLICA IDENTITY FULL` on all three tables, so update/delete events carry the full old row.
-- Publication `dbz_publication` with only the three tables, created by the init SQL (Debezium
-  must not create it: its default would be `FOR ALL TABLES`, which needs superuser).
-- A dedicated `debezium` user with `REPLICATION` and `SELECT` on `shop`.
+- Publication `dbz_publication` with only the three tables, created by `source/schema.sql`
+  (Debezium must not create it: its default would be `FOR ALL TABLES`, which needs superuser).
+- A dedicated `debezium` user with `LOGIN` + `REPLICATION` and `SELECT` on `shop` (also on future
+  tables, via `ALTER DEFAULT PRIVILEGES`); password `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`.
+
+All of it — schema, tables, triggers, CDC setup — lives in **`source/schema.sql`**, applied on
+every `up` by the one-shot **`source-db-setup`** job (`compose/source.yml`, image `postgres:16`,
+`psql -v ON_ERROR_STOP=1`). The script is idempotent (`IF NOT EXISTS`, `CREATE OR REPLACE
+TRIGGER`, and `SELECT … WHERE NOT EXISTS … \gexec` for the publication and the role, which have
+no `IF NOT EXISTS`). The Debezium password reaches SQL as a psql variable: compose passes
+`.env` into the container, the job runs `psql -v debezium_password="$DEBEZIUM_PASSWORD"`, and the
+script reads `:'debezium_password'` (quoted safely; psql does not substitute variables inside
+`DO $$ … $$`, hence `\gexec`).
 
 ### 3.3. Generator
 
@@ -118,7 +130,8 @@ Design choices:
 
 - creates an order — in **one transaction**: insert `orders`, insert 1–5 `order_details`, then
   update `orders.total_amount`;
-- moves an order's status forward (pending → paid → shipped → delivered, or → cancelled);
+- moves an order's status forward (pending → paid → shipped → completed; or → cancelled;
+  a completed order may become refunded);
 - updates a user (city, phone) or locks a user;
 - occasionally deletes an order (cascades to its lines).
 

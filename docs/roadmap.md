@@ -46,12 +46,16 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 
 - [x] `source-db` instance (`compose/source.yml`): database `source-db`, host port 5433,
   `wal_level=logical`, `max_slot_wal_keep_size=1GB`.
-- [ ] `source/schema.sql`: schema `shop` with `users`, `orders`, `order_details` (design §3.1) —
+- [x] `source/schema.sql`: schema `shop` with `users`, `orders`, `order_details` (design §3.1) —
   `varchar` + `CHECK` statuses, `line_total` as a plain column, `updated_at` trigger,
   `ON DELETE CASCADE` on `order_details.order_id`.
-- [ ] CDC setup (design §3.2), applied by an idempotent one-shot `source-db-setup` job:
-  `REPLICA IDENTITY FULL` on the three tables, publication `dbz_publication`, role `debezium`
-  (`REPLICATION` + `SELECT` on `shop`, password `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`).
+- [x] CDC setup (design §3.2) in the same script, applied by the idempotent one-shot
+  `source-db-setup` job: `REPLICA IDENTITY FULL` on the three tables, publication
+  `dbz_publication`, role `debezium` (`REPLICATION` + `SELECT` on `shop`, password from
+  `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD` via a psql variable). Verified 2026-11-02: applied twice
+  (second run changes nothing), `debezium` logs in over the network with the `.env` password and
+  can create a logical slot and decode changes (UPDATE/DELETE carry the full old row; a cascaded
+  delete gives two DELETEs in one transaction).
 - [ ] `generator.py` (Python + Faker + psycopg, `--rate` events/second): create orders in one
   transaction, move statuses forward, update/lock users, occasionally delete an order.
 - [ ] `generator` Compose service under profile `generator` (started and stopped by hand).
