@@ -37,8 +37,12 @@ no HA, replicas, poolers or TLS.
   (2026-11-02): `source/schema.sql` (schema `shop`, 3 tables, triggers, publication
   `dbz_publication`, role `debezium`) is applied by the one-shot `source-db-setup` job (idempotent,
   CDC-ready), and `source/generator.py` fills it continuously. Phase 3 is **done** (2026-11-03):
-  Debezium on Kafka Connect streams `shop.*` into Avro topics `src.shop.*`. **Next: phase 4
-  (bronze — Iceberg sink on the same Connect worker).**
+  Debezium on Kafka Connect streams `shop.*` into Avro topics `src.shop.*`. Phase 4 is
+  **done** (2026-11-03): the Iceberg sink `iceberg-bronze` (Iceberg **1.10.2** — the newest with Java
+  11 bytecode; the worker runs Java 11) writes `lakehouse.bronze.{users,orders,order_details}_cdc`,
+  one commit/snapshot per ~60 s, exactly-once (verified through a Connect restart: bronze rows =
+  Kafka offsets, and rebuilding current state from bronze equals the source); Spark's Iceberg 1.5.2
+  reads them. **Next: phase 5 (silver — SCD2 in Postgres; its design was deferred to that phase).**
 - **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
   3.3): compose profile `generator`, so a plain `up` never starts it. Rate `GENERATOR_RATE` (`.env`).
   Pitfalls already fixed — keep them: the psycopg connection must be `autocommit=True` (otherwise
@@ -93,7 +97,12 @@ the others by service name. All credentials and tunables live in `.env` and are 
   (internal only) — the search layer.
 - **CDC** (`compose/connect.yml`): **Kafka Connect** `custom-connect:7.6.0` from `connect/Dockerfile`
   (`cp-kafka-connect:7.6.0` + **Debezium Postgres 2.7.4.Final**, Maven Central tarball, SHA-1
-  checked — the image runs **Java 11**, so Debezium 3.x (Java 17) is out). Distributed mode, one
+  checked — the image runs **Java 11**, so Debezium 3.x (Java 17) is out). Multi-stage: stage
+  `iceberg-build` (Temurin 17 JDK) builds the **Iceberg 1.10.2** Kafka Connect runtime zip from the
+  SHA-512-checked source release with Gradle (first build ~6.5 min; BuildKit cache mount for
+  `/root/.gradle`) and the plugin is copied to
+  `/usr/share/confluent-hub-components/iceberg-kafka-connect-runtime-1.10.2/` (257 jars, none above
+  Java 11 bytecode, no Kafka jars bundled — it uses the worker's Kafka 3.6). Distributed mode, one
   worker, REST `kafka-connect:8083` (internal), internal topics `_connect-configs/-offsets/-status`
   at RF 1, Avro default converters, `config.providers=env`: connector JSON reads secrets as
   `${env:VAR}` from the container environment (never stored in the config topic). One-shot
@@ -105,7 +114,14 @@ the others by service name. All credentials and tunables live in `.env` and are 
   `heartbeat.action.query` upserting `public.debezium_heartbeat` (in the publication, not in
   `table.include.list`) — without the action query the slot never advances while `shop.*` is idle,
   because pgoutput sends nothing for unpublished tables. After editing a connector JSON:
-  `docker compose up -d --force-recreate connect-setup`. **Kafka UI** (`kafbat/kafka-ui:v1.5.0`,
+  `docker compose up -d --force-recreate connect-setup`. Sink `iceberg-bronze`
+  (`connect/connectors/iceberg-bronze.json`, design §5) reads `POLARIS_SECRET` and `S3_*` as
+  `${env:...}` (passed into `kafka-connect`); `connect-setup` also waits for `polaris-setup`.
+  Commit mechanics, consumer groups and the harmless `Commit timeout reached` on idle topics:
+  design §5; check recipes: `docs/services.md` → "Checking bronze". Bronze money columns are
+  `decimal(38,2)`, timestamps inside `before`/`after` stay ISO strings, `_ingested_at` = Kafka
+  record time.
+  **Kafka UI** (`kafbat/kafka-ui:v1.5.0`,
   host **8082**, same module): read-only browser over topics, Schema Registry and Connect; the
   `SchemaRegistry` serde is preselected for `src.*` topics (the UI defaults to `String` = raw
   bytes). Check recipes: `docs/services.md` → "Checking CDC".
@@ -129,7 +145,8 @@ the others by service name. All credentials and tunables live in `.env` and are 
   creates the `lakehouse` catalog (base location `s3://${S3_BUCKET}/`, RustFS endpoint,
   `pathStyleAccess`, `stsUnavailable=true`,
   `polaris.config.drop-with-purge.enabled=true`), grants `CATALOG_MANAGE_CONTENT` to
-  `catalog_admin`, and creates namespaces `bronze`/`silver`/`gold` via the Iceberg REST API. No
+  `catalog_admin`, and creates namespace `bronze` via the Iceberg REST API (only bronze is on Iceberg: silver is in
+  Postgres, gold in ClickHouse; the old `silver`/`gold` namespaces were dropped 2026-11-03). No
   credential vending: every engine brings its own S3 keys.
 - **Processing** (`compose/spark.yml`): Spark 3.5.1 from `spark/Dockerfile` (`custom-spark:3.5.1`:
   hadoop-aws, `iceberg-spark-runtime` + `iceberg-aws-bundle` 1.5.2, Postgres JDBC, kafka-clients).
@@ -149,7 +166,9 @@ the others by service name. All credentials and tunables live in `.env` and are 
   the editor replaced the file's inode.
 - **Query** (`compose/trino.yml`): **Trino 454** (8080), Iceberg connector on Polaris
   (`trino/catalog/lakehouse.properties`) + native S3 to RustFS. 454 is the minimum: it is the first
-  version with `iceberg.rest-catalog.oauth2.scope` (435 fails with `invalid_scope`).
+  version with `iceberg.rest-catalog.oauth2.scope` (435 fails with `invalid_scope`). `LESSCHARSET=utf-8` in
+  its environment: the image locale is POSIX, so the CLI's pager (`less`) showed UTF-8 as `<E1>…`.
+  Right after a (re)start it answers "No nodes available" for a few seconds although healthy.
 - **Orchestration** (`compose/airflow.yml`): Airflow 2.9.2, LocalExecutor, `custom-airflow:2.9.2`
   from `airflow/Dockerfile` (+ `airflow/requirements.txt`, installed against the 2.9.2
   constraints). UI on **8085**. Its metadata DB is reached as the `airflow` role (owner of DB
@@ -174,8 +193,7 @@ the others by service name. All credentials and tunables live in `.env` and are 
   Loki is distroless, so `alloy`'s healthcheck probes both via bash `/dev/tcp` (`CMD bash -c`, not
   `CMD-SHELL`).
 
-To be added by the roadmap: the Iceberg sink (zip built into `custom-connect`), ClickHouse,
-Superset, FastAPI.
+To be added by the roadmap: ClickHouse, Superset, FastAPI.
 
 ## Common commands
 
@@ -189,7 +207,8 @@ reachable from Windows on `localhost` (WSL2 forwarding), e.g. DataGrip on 5432/5
 
 ```bash
 docker compose config            # validate/merge the included compose files — first sanity check
-docker compose build             # build custom images (custom-spark, custom-airflow, custom-connect)
+docker compose build             # build custom images (custom-spark, custom-airflow, custom-connect;
+                                 # custom-connect's first build compiles Iceberg: ~6.5 min)
 docker compose up -d --remove-orphans
 docker compose up -d <service>   # one service and its dependencies
 docker compose logs -f <service>
@@ -235,7 +254,7 @@ docker exec -e PYTHONPATH=/tmp/pylib:/opt/spark/jobs:/opt/spark/python/lib/pyspa
 ```
 
 Catalog check: `docker exec trino trino --execute "SHOW SCHEMAS FROM lakehouse"` →
-`bronze gold information_schema silver`.
+`bronze information_schema`.
 
 ### Key ports (host)
 

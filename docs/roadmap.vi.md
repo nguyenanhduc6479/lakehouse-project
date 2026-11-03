@@ -10,7 +10,7 @@ Mỗi phase kết thúc bằng một thứ nhìn thấy được là đang chạ
 | 1 | Dọn sạch | Xong |
 | 2 | Nguồn | Xong |
 | 3 | CDC | Xong |
-| 4 | Bronze | Chưa bắt đầu |
+| 4 | Bronze | Xong |
 | 5 | Silver | Chưa bắt đầu |
 | 6 | Gold | Chưa bắt đầu |
 | 7 | Search + API | Chưa bắt đầu |
@@ -178,24 +178,191 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `kafka-avro-console-consumer` in log ra stdout (lọc các dòng bắt đầu bằng `{`) và hiển thị decimal
   Avro dưới dạng byte thô — giải mã bằng `scale` trong schema.
 
-## Phase 4 — Bronze
+## Phase 4 — Bronze *(xong)*
 
 **Mục tiêu:** event thay đổi được ghi thành các bảng Iceberg chỉ-append, query được từ Trino.
 
-- [ ] Build file zip Iceberg Kafka Connect sink từ source của Iceberg (multi-stage build trong
-  Dockerfile của Connect — sink không được phát hành sẵn). Chọn phiên bản Iceberg có REST client hỗ
-  trợ thuộc tính OAuth2 `scope`.
-- [ ] Đăng ký sink connector (design §5): SMT `InsertField` thêm `_topic` / `_partition` /
-  `_offset` / `_ingested_at`, định tuyến tĩnh ba topic, tự tạo bảng + schema evolution, partition
-  `day(_ingested_at)`, `format-version=2`, cấu hình Polaris + S3 (RustFS).
+Các bước (bước nào xong thì ghi kết quả ngay, để theo dõi được từng bước):
 
-**Hoàn thành khi:**
+| Bước | Nội dung | Trạng thái |
+|---|---|---|
+| 4.1 | Chọn phiên bản Iceberg cho sink | Xong 2026-11-03 |
+| 4.2 | Build Iceberg sink vào `custom-connect` (Dockerfile multi-stage) | Xong 2026-11-03 |
+| 4.3 | Truyền credential Polaris + S3 cho `kafka-connect`; viết `connect/connectors/iceberg-bronze.json` (design §5) | Xong 2026-11-03 |
+| 4.4 | Đăng ký qua `connect-setup`, kiểm tra ba bảng bronze trong Trino | Xong 2026-11-03 |
+| 4.5 | Đọc bronze từ Spark (Iceberg 1.5.2) qua `helper.get_spark` | Xong 2026-11-03 |
+| 4.6 | Tài liệu, trạng thái roadmap, bài học | Xong 2026-11-03 |
+
+### 4.1 — Phiên bản Iceberg: **1.10.2** *(xong)*
+
+Ràng buộc: worker `kafka-connect` chạy **Java 11** (`cp-kafka-connect:7.6.0`, Zulu 11.0.21); REST
+client phải gửi được OAuth2 **`scope`** mà Polaris yêu cầu (`PRINCIPAL_ROLE:ALL`); bảng tạo ra phải
+đọc được bằng Iceberg **1.5.2** của Spark.
+
+Kết quả (kiểm tra 2026-11-03 trên Maven Central và tag `apache-iceberg-1.10.2`):
+
+- **Mức Java** — đọc trực tiếp từ class file của từng jar đã phát hành:
+
+  | Iceberg | Bytecode của `iceberg-core` / `iceberg-kafka-connect` |
+  |---|---|
+  | 1.6.1 | Java 8 |
+  | 1.7.2 – **1.10.2** | **Java 11** |
+  | 1.11.0, 1.12.0 (mới nhất) | Java 17 — sẽ lỗi trên worker (`UnsupportedClassVersionError`) |
+
+  Vậy **1.10.2 là bản mới nhất chạy được trên Java 11**.
+- **OAuth2 scope** — `org.apache.iceberg.rest.auth.OAuth2Properties` của 1.10.2 có `scope` (cùng với
+  `credential`, `oauth2-server-uri`); sink chuyển mọi thuộc tính `iceberg.catalog.*` cho catalog, nên
+  `iceberg.catalog.scope=PRINCIPAL_ROLE:ALL` tới được REST client.
+- **Không có bản dựng sẵn** — `iceberg-kafka-connect` (jar của connector) có trên Maven Central,
+  nhưng `iceberg-kafka-connect-runtime` (file zip plugin kèm đủ dependency: Parquet, AWS SDK, REST
+  catalog…) thì không. Phải build từ source: `./gradlew -x test -x integrationTest
+  :iceberg-kafka-connect:iceberg-kafka-connect-runtime:distZip` → file zip nằm dưới
+  `kafka-connect/kafka-connect-runtime/build/distributions/` (hai biến thể; bản không có Hive
+  metastore client là đủ cho REST catalog).
+- **Source** — `https://archive.apache.org/dist/iceberg/apache-iceberg-1.10.2/apache-iceberg-1.10.2.tar.gz`,
+  SHA-512 `7eba5c85…65b9bd` (giá trị đầy đủ trong file `.sha512` bên cạnh; Dockerfile sẽ kiểm tra).
+  Bản release không kèm `gradle-wrapper.jar`; `gradlew` của Iceberg tự tải về (Gradle 8.14.3).
+- **JDK để build** — build chấp nhận JDK 11, 17 hoặc 21 và luôn biên dịch với `options.release = 11`,
+  nên build trên image JDK 17 vẫn ra bytecode Java 11.
+- **Format** — bảng được tự tạo với `format-version=2` (design §5), Iceberg 1.5.2 của Spark đọc được;
+  1.10 chỉ ghi các tính năng v3 (deletion vector, row lineage) trên bảng v3.
+
+Rủi ro để lại cho các bước sau:
+
+- **Phiên bản Kafka API** — 1.10.2 được biên dịch với Kafka **3.9.1**; worker cung cấp Kafka **3.6**
+  (`connect-api`/`kafka-clients` là compile-only, không đóng gói kèm). Dự kiến chạy được (Connect API
+  tương thích ngược), nhưng chỉ chạy thật mới chắc → 4.4.
+- **Commit transactional** — sink commit offset Kafka và snapshot Iceberg bằng transactional
+  producer; transaction log của broker đã ở RF 1 (phase 1), nếu không sẽ lỗi khi chỉ có một broker
+  → 4.4.
+- **Polaris + RustFS từ sink** — S3FileIO với path-style và endpoint RustFS, không có credential
+  vending; giống cấu hình Trino và Spark đang dùng → 4.4.
+
+### 4.2 — Build sink vào `custom-connect` *(xong)*
+
+`connect/Dockerfile` giờ là multi-stage:
+
+1. **`iceberg-build`** (`eclipse-temurin:17.0.20_8-jdk-noble`): tải source release 1.10.2, kiểm tra
+   SHA-512, chạy `./gradlew --no-daemon -x test -x integrationTest
+   :iceberg-kafka-connect:iceberg-kafka-connect-runtime:distZip` rồi giải nén file zip (bằng
+   `jar xf` — image JDK không có `unzip`). Các file Gradle tải về nằm trong BuildKit cache mount
+   (`/root/.gradle`), không nằm trong image.
+2. **Connect worker** (`cp-kafka-connect:7.6.0`): Debezium như cũ, thêm `COPY --from=iceberg-build`
+   thư mục plugin vào `/usr/share/confluent-hub-components/iceberg-kafka-connect-runtime-1.10.2/`
+   (owner `appuser`). Mỗi thư mục plugin có class loader riêng, nên jar của Iceberg và Debezium
+   không đụng nhau.
+
+Kết quả (2026-11-03):
+
+- Lần build đầu **~6,5 phút** (Gradle ~5,5 phút: tải dependency và biên dịch các module Iceberg cần
+  thiết). Các lần build sau dùng lại layer cache của Docker — stage này chỉ chạy lại khi đổi tham
+  số phiên bản/checksum. Image `custom-connect:7.6.0`: 3,26 GB (phần lớn là image gốc của
+  Confluent).
+- Plugin: 257 jar, 181 MB. **Không đóng gói `kafka-clients` / `connect-api`** → sink chạy trên thư
+  viện Kafka 3.6 của worker (rủi ro về phiên bản API từ 4.1 vẫn còn, chờ 4.4).
+- **Quét bytecode cả 257 jar** (class-file version cao nhất của từng jar, bỏ qua
+  `META-INF/versions`): Java 3–8: 235 jar, Java 11: 15 jar, **trên Java 11: không có** — các
+  dependency (AWS SDK 2.33, Parquet 1.16…) cũng chạy được trên Java 11 của worker.
+- Khởi động lại worker với image mới: `GET /connector-plugins` liệt kê
+  `org.apache.iceberg.connect.IcebergSinkConnector 1.10.2 sink` cạnh Debezium; log cho thấy plugin
+  đã được nạp (kèm các transform `DebeziumTransform`, `KafkaMetadataTransform`…); `source-shop` vẫn
+  `RUNNING` (giữ offset, không snapshot lại).
+
+### 4.3 — Cấu hình sink và credential *(xong)*
+
+- **`connect/connectors/iceberg-bronze.json`** (connector `iceberg-bronze`): đúng như design §5, thêm
+  `tasks.max=1` và ghi rõ control topic `control-iceberg` (topic điều phối của sink; tự tạo ở lần
+  chạy đầu). Mọi tên thuộc tính đã được đối chiếu với tài liệu của 1.10.2
+  (`docs/docs/kafka-connect.md` ở tag `apache-iceberg-1.10.2`).
+- **Secret vẫn ở dạng `${env:...}`**: `compose/connect.yml` giờ truyền `POLARIS_SECRET`,
+  `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` từ `.env` vào `kafka-connect`; JSON chỉ
+  ghi tên biến (`"iceberg.catalog.credential": "root:${env:POLARIS_SECRET}"` — tham chiếu provider
+  dùng được bên trong một chuỗi dài hơn).
+- **Thứ tự khởi động**: `connect-setup` giờ chờ thêm `polaris-setup` (catalog `lakehouse` +
+  namespace `bronze`; bản thân nó đã chờ RustFS tạo bucket).
+
+Kết quả (2026-11-03), chưa đăng ký connector:
+
+- Bên trong `kafka-connect`: đủ năm biến; xin token OAuth2 của Polaris với
+  `scope=PRINCIPAL_ROLE:ALL` → HTTP 200 có `access_token`; `GET ${S3_ENDPOINT}/health` → 200.
+- `PUT /connector-plugins/IcebergSinkConnector/config/validate` với file JSON →
+  **`error_count = 0`** trên 48 mục được kiểm tra (connector, converter và transform `InsertField`).
+- `GET /connectors` vẫn chỉ có `source-shop`. Lưu ý: lần chạy `connect-setup` tiếp theo sẽ đăng ký
+  mọi file `connect/connectors/*.json`, tức là khởi động sink — đó là bước 4.4.
+
+### 4.4 — Đăng ký và kiểm tra trong Trino *(xong)*
+
+`docker compose up -d --force-recreate connect-setup` → `Connector iceberg-bronze created` +
+`RUNNING`. Kết quả (2026-11-03):
+
+- **Bảng**: sink tự tạo `bronze.users_cdc` / `orders_cdc` / `order_details_cdc` trong Polaris khi
+  nhận record đầu tiên (`SHOW TABLES FROM lakehouse.bronze`): `before`/`after`/`source` là row lồng
+  nhau, `op`, `ts_ms`, bốn cột metadata `_`, Parquet, `format_version = 2`,
+  `partitioning = ARRAY['day(_ingested_at)']`, location `s3://data-platform/bronze/<table>`.
+- **Đọc bù**: group `connect-iceberg-bronze` chưa có offset nên sink đọc các topic từ đầu (gồm cả
+  event snapshot `r`). Lần commit có dữ liệu đầu tiên ~95 giây sau khi khởi động (hai lần commit đầu
+  hết thời gian chờ 30 giây trong lúc worker còn đang nạp bảng, và không commit gì).
+- **Trạng thái ổn định** (bật generator): commit mỗi ~60 giây, mỗi lần xong trong dưới 2 giây và
+  ghi cả ba bảng (`valid-through` = thời điểm commit); mỗi lần commit là một snapshot `append`; mỗi
+  bảng mỗi lần commit một file Parquet ~23 KB. Khi các topic không có dữ liệu mới, commit hết thời
+  gian chờ sau 30 giây và không commit gì — vô hại.
+- **Exactly-once, kể cả khi restart**: restart `kafka-connect` giữa lúc đang ghi; sau đó, với từng
+  bảng, số dòng bronze = số message Kafka = số giá trị `_offset` khác nhau, offset liên tục từ 0
+  (users 139, orders 837, order_details 1359), consumer lag 0.
+- **Bronze = nguồn**: dựng lại trạng thái hiện tại từ bronze (event cuối của mỗi khóa theo
+  `source.lsn`, bỏ các khóa đã xóa) ra đúng y hệt các bảng nguồn — cùng khóa và `updated_at` cho
+  89 users, 401 orders, 1237 dòng chi tiết.
+- Ba rủi ro còn mở từ 4.1 đã được đóng: sink build với Kafka 3.9 chạy trên worker 3.6, commit
+  transactional với một broker, OAuth2 scope của Polaris + RustFS từ sink — đều chạy được.
+- Hai cảnh báo lúc khởi động đã hết nhờ khai báo rõ `iceberg.catalog.rest.auth.type=oauth2` và
+  `iceberg.catalog.oauth2-server-uri` (Iceberg 1.10 tự suy ra cả hai).
+- Kiểu dữ liệu: tiền là `decimal(38,2)` trong bronze (sink giữ scale, không giữ precision 18 của
+  Avro); các cột thời gian trong `before`/`after` vẫn là chuỗi ISO-8601; `_ingested_at` là
+  `timestamp(6) with time zone` = thời điểm của record Kafka.
+
+### 4.5 — Đọc từ Spark *(xong)*
+
+Một script tạm (`get_spark` + `spark.table("lakehouse.bronze.<table>")`, submit bằng
+`/opt/spark/bin/spark-submit --py-files /opt/spark/jobs/helper.py`) chạy trên cluster
+(`spark://spark-master:7077`) với Iceberg **1.5.2**: đọc được cả ba bảng, số dòng bằng Trino,
+`format-version=2`, struct lồng nhau và giá trị `Decimal` nguyên vẹn, số `op` của orders là c 249 /
+d 22 / r 174 / u 392. Bảng do Iceberg 1.10.2 ghi ở v2 đọc được bằng 1.5.2.
+
+### 4.6 — Tài liệu *(xong)*
+
+Design §4.3 (decimal trong bronze) và §5 (JSON cuối cùng của sink, cơ chế commit, consumer group,
+ý nghĩa `_ingested_at`), `docs/services.md` ("Checking bronze"), `CLAUDE.md`, roadmap này.
+Dọn dẹp: hai namespace Iceberg `silver` và `gold` (do `polaris-setup` tạo từ thiết kế cũ, khi mọi
+tầng đều trên Iceberg; luôn trống) đã được xóa, và `polaris/scripts/init.sh` giờ chỉ tạo `bronze`
+— silver nằm trong Postgres, gold trong ClickHouse, nên catalog chỉ hiện những gì thật sự nằm trên
+Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
+
+**Hoàn thành khi** (cả phase):
 - `SHOW TABLES FROM lakehouse.bronze` trong Trino → `users_cdc`, `orders_cdc`, `order_details_cdc`.
 - `SELECT op, after.order_id, source.lsn FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20`
   trả về các event gần nhất, và có dòng mới khoảng mỗi phút (commit interval).
 - `SELECT * FROM lakehouse.bronze."orders_cdc$snapshots"` cho thấy mỗi lần commit là một snapshot
   `append`.
 - Spark (Iceberg 1.5.2) đọc được bảng bronze qua `helper.get_spark`.
+
+**Rút ra được:**
+- Đọc bytecode thay vì đọc release note: quét class-file version của các jar đã phát hành (và sau
+  đó của cả 257 jar đóng gói kèm) trả lời chắc chắn câu "có chạy trên Java 11 không?".
+- Dependency của plugin quan trọng không kém plugin: file zip runtime đóng gói Parquet, AWS SDK,
+  Hadoop… nhưng cố ý không đóng gói Kafka — nó chạy trên thư viện Kafka của worker.
+- `validate` trước khi `create`: `PUT /connector-plugins/<class>/config/validate` của Connect bắt
+  lỗi cấu hình mà không khởi động gì; kết nối (token Polaris, S3) kiểm tra được từ bên trong
+  container worker với chính các biến môi trường đó.
+- Chờ đúng điều kiện: hai lần việc kiểm tra chờ nhầm thứ (dòng commit cũ trong log, số snapshot mà
+  một bảng không bao giờ đạt tới vì có lần commit bỏ qua nó). Hãy chờ đúng thứ mình cần (số dòng
+  bronze = end offset của Kafka), không chờ một chỉ số đại diện.
+- Commit timeout trong log không phải lỗi: sink idle hoặc vừa khởi động sẽ hết thời gian chờ và
+  không commit gì; dữ liệu không bao giờ mất vì offset Kafka chỉ tiến khi commit Iceberg thành công.
+- Exactly-once vào Iceberg vẫn đúng khi restart (không hụt, không trùng `_offset`); bản trùng chỉ có
+  thể đến từ phía trước (Debezium at-least-once) — silver vẫn phải khử trùng.
+- Stream vào Iceberg sinh nhiều file nhỏ (mỗi bảng một file mỗi lần commit): ổn cho demo, compaction
+  là việc của phase 8.
+- Python 3.8 trong image Spark: biểu thức trong f-string không được chứa dấu backslash.
 
 ## Phase 5 — Silver
 

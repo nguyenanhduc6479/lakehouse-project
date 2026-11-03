@@ -18,6 +18,9 @@ services:
     logging: *default-logging
     environment:
       TZ: ${TZ}
+      # the image's locale is POSIX: without this, `less` (the trino CLI's pager) prints UTF-8 as
+      # <E1><BA><BF> instead of Vietnamese text
+      LESSCHARSET: utf-8
       POLARIS_SECRET: ${POLARIS_SECRET}
       # read by trino/catalog/lakehouse.properties via ${ENV:...} to access data files on RustFS
       S3_ENDPOINT: ${S3_ENDPOINT}

@@ -58,7 +58,7 @@ OLAP engine (MergeTree, background merges, `FINAL`, incremental loads from an ex
 |---|---|---|
 | `source-db` (Postgres 16) | Simulated OLTP: `users`, `orders`, `order_details` | Own instance (`compose/source.yml`), database `source-db`, host port 5433, `wal_level=logical` |
 | `generator.py` | Continuous insert/update/delete into the source | Python + Faker + psycopg, adjustable rate |
-| Kafka Connect | Runs Debezium (source) and the Iceberg sink | Custom image on `confluentinc/cp-kafka-connect` (AvroConverter built in) + Debezium Postgres plugin + Iceberg sink zip (not published as an artifact — built from the Iceberg source in a multi-stage Dockerfile) |
+| Kafka Connect | Runs Debezium (source) and the Iceberg sink | Custom image on `confluentinc/cp-kafka-connect` (AvroConverter built in) + Debezium Postgres plugin + Iceberg sink zip (not published as an artifact — built from the Iceberg source in a multi-stage Dockerfile; **Iceberg 1.10.2**, the newest that runs on the worker's Java 11) |
 | Kafka UI | Look inside Kafka: topics, Avro-decoded messages, schemas, connectors (read-only) | `kafbat/kafka-ui`, host port 8082 |
 | Kafka (+ Zookeeper) | Carries Avro events | Already in `compose/infra.yml` |
 | Schema Registry | Stores Avro schemas, checks compatibility | Already in `compose/infra.yml` |
@@ -229,7 +229,7 @@ the job waits until the connector and its task are `RUNNING`.
 | `bigint` | `long` | |
 | `integer`, `smallint` | `int` | Avro has no short |
 | `varchar`, `text` | `string` | |
-| `numeric(18,2)` | `bytes` + logical type `decimal` | Exact, thanks to `precise` mode |
+| `numeric(18,2)` | `bytes` + logical type `decimal` | Exact, thanks to `precise` mode; in bronze it becomes `decimal(38,2)` (the sink keeps the scale but not the precision) |
 | `timestamptz` | `string` (`io.debezium.time.ZonedTimestamp`, ISO-8601) | Parse to timestamp |
 
 ### 4.4. Envelope
@@ -274,11 +274,12 @@ Kafka's built-in `InsertField` SMT adds `_topic`, `_partition`, `_offset` and `_
 because that one writes the timestamp as a plain `long`, and Iceberg's `day()` partition
 transform needs a real timestamp. Tables are partitioned by `day(_ingested_at)`.
 
-Sink connector config:
+Sink connector config (`connect/connectors/iceberg-bronze.json`, connector `iceberg-bronze`):
 
 ```json
 {
   "connector.class": "org.apache.iceberg.connect.IcebergSinkConnector",
+  "tasks.max": "1",
   "topics": "src.shop.users,src.shop.orders,src.shop.order_details",
   "key.converter": "io.confluent.connect.avro.AvroConverter",
   "key.converter.schema.registry.url": "http://schema-registry:8081",
@@ -301,11 +302,14 @@ Sink connector config:
   "iceberg.tables.evolve-schema-enabled": "true",
   "iceberg.tables.default-partition-by": "day(_ingested_at)",
   "iceberg.tables.auto-create-props.format-version": "2",
+  "iceberg.control.topic": "control-iceberg",
   "iceberg.control.commit.interval-ms": "60000",
 
   "iceberg.catalog.type": "rest",
   "iceberg.catalog.uri": "http://polaris:8181/api/catalog",
   "iceberg.catalog.warehouse": "lakehouse",
+  "iceberg.catalog.rest.auth.type": "oauth2",
+  "iceberg.catalog.oauth2-server-uri": "http://polaris:8181/api/catalog/v1/oauth/tokens",
   "iceberg.catalog.credential": "root:${env:POLARIS_SECRET}",
   "iceberg.catalog.scope": "PRINCIPAL_ROLE:ALL",
   "iceberg.catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
@@ -322,12 +326,30 @@ Sink connector config:
 - `format-version=2`: the Spark cluster runs Iceberg 1.5.2, which can't read v3 tables that a
   newer sink might create.
 - `commit.interval-ms=60000`: the default is 5 minutes; one minute keeps the demo responsive.
+  Each commit that has data adds one `append` snapshot and one Parquet file per table and day
+  (~20 KB each at demo rates) — many small files, which phase 8 compacts.
+- `rest.auth.type=oauth2` + `oauth2-server-uri`: without them Iceberg 1.10 infers both and logs a
+  warning that the token-endpoint fallback will be removed in a future release.
 - Delivery into Iceberg is exactly-once (Kafka offsets are committed together with the Iceberg
-  snapshot). Duplicates can still appear because Debezium itself is at-least-once: after a crash
-  it re-sends events since its last flushed LSN. Silver handles that (§6.2).
+  snapshot; verified by restarting Kafka Connect mid-stream — no missing or duplicated `_offset`).
+  Duplicates can still appear because Debezium itself is at-least-once: after a crash it re-sends
+  events since its last flushed LSN. Silver handles that (§6.2).
+- How a commit works: a coordinator (the task that owns partition 0 of the first topic) sends
+  `START_COMMIT` on the control topic `control-iceberg` every interval; each worker answers with
+  the files it wrote; the coordinator commits them as one snapshot per table. Observed: while
+  records flow a commit completes in under 2 s; when the topics are idle (and right after a
+  start) it waits for `commit.timeout-ms` (30 s), logs `Commit timeout reached` and commits what
+  arrived — usually nothing. Harmless: nothing is lost, the next commit picks it up.
+- Consumer groups in Kafka UI: `connect-iceberg-bronze` (the data topics; its offsets are only
+  advanced on a successful Iceberg commit), `connect-iceberg-bronze-coord` and `cg-control-*`
+  (the control topic).
+- `_ingested_at` is the Kafka record timestamp, i.e. when Debezium produced the event — not when
+  the sink wrote it. Rows from the initial catch-up therefore carry their original times.
 
 Bronze is queryable from Trino right away, e.g.
 `SELECT op, after.order_id, source.lsn FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20`.
+Timestamp columns inside `before`/`after` stay ISO-8601 strings (`ZonedTimestamp`, §4.3); silver
+parses them.
 
 ## 6. Silver — SCD Type 2 on Postgres
 

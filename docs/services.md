@@ -141,7 +141,9 @@ after the service name, e.g. `docker compose --profile generator run --rm genera
 - *Schema Registry*: the subjects Debezium registered, their versions and compatibility.
 - *Kafka Connect* → `source-shop`: connector and task state, its config (the password stays
   `${env:...}`).
-- *Consumers*: consumer groups and their lag (the Iceberg sink appears here in phase 4).
+- *Consumers*: consumer groups and their lag. The Iceberg sink shows up as
+  `connect-iceberg-bronze` (data topics; lag drops to 0 at each commit, ~every minute) plus
+  `connect-iceberg-bronze-coord` and `cg-control-*` on its control topic `control-iceberg`.
 
 It is read-only (`KAFKA_CLUSTERS_0_READONLY`): no producing, deleting topics or editing
 connectors from the UI — those stay in code.
@@ -200,7 +202,38 @@ the big-endian integer divided by 10^scale (scale 2).
 Re-register connectors after editing `connect/connectors/*.json`:
 `docker compose up -d --force-recreate connect-setup`.
 
+## Checking bronze
+
+The Iceberg sink `iceberg-bronze` commits about once a minute; each commit is one Iceberg snapshot
+per table. From Trino (`docker exec -it trino trino --catalog lakehouse --schema bronze`, or
+DataGrip on `localhost:8080`, user any name, no password, catalog `lakehouse`). Long results open
+in `less`: `q` leaves it, ← → scroll wide tables, `quit;` leaves the CLI; add `--pager=''` to print
+straight to the terminal. Columns `before` / `after` / `source` are ROW types: filter with
+`coalesce(after.user_id, before.user_id) = 1` (`after` is NULL on deletes, `before` on inserts).
+
+```sql
+SHOW TABLES FROM lakehouse.bronze;    -- users_cdc, orders_cdc, order_details_cdc
+
+-- latest change events
+SELECT op, after.order_id, after.status, after.total_amount, source.lsn, source.txid, _ingested_at
+FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20;
+
+-- one row per commit
+SELECT committed_at, operation, summary['added-records'] AS added, summary['total-records'] AS total
+FROM lakehouse.bronze."orders_cdc$snapshots" ORDER BY committed_at;
+
+-- data files on RustFS (one small Parquet file per table per commit)
+SELECT file_path, record_count, file_size_in_bytes FROM lakehouse.bronze."orders_cdc$files";
+```
+
+Sink state: `docker exec kafka-connect curl -s localhost:8083/connectors/iceberg-bronze/status`.
+Commits in the log (Grafana, service `kafka-connect`, search `Commit`): `Commit <id> complete,
+committed to 3 table(s)` while data flows; `Commit timeout reached ... committed to 0 table(s)` when
+the topics are idle is normal. Bronze is complete when its row count equals the topic's end offset
+(Kafka UI → topic → *Number of messages*). The files themselves are browsable in the RustFS console
+under `data-platform/bronze/`.
+
 ## Not built yet
 
-Planned by the [roadmap](roadmap.md), ports not assigned yet: the Iceberg sink (on the existing
-Kafka Connect), ClickHouse, Superset, FastAPI + web page. Add them here when they land.
+Planned by the [roadmap](roadmap.md), ports not assigned yet: ClickHouse, Superset, FastAPI + web
+page. Add them here when they land.

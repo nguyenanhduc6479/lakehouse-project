@@ -9,7 +9,7 @@ Each phase ends with something you can see working; don't start a phase before t
 | 1 | Clean slate | Done |
 | 2 | Source | Done |
 | 3 | CDC | Done |
-| 4 | Bronze | Not started |
+| 4 | Bronze | Done |
 | 5 | Silver | Not started |
 | 6 | Gold | Not started |
 | 7 | Search + API | Not started |
@@ -173,23 +173,193 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `kafka-avro-console-consumer` prints its logs to stdout (filter lines starting with `{`) and
   shows Avro decimals as raw bytes — decode them with the schema's `scale`.
 
-## Phase 4 — Bronze
+## Phase 4 — Bronze *(done)*
 
 **Goal:** the change events land as append-only Iceberg tables, queryable from Trino.
 
-- [ ] Build the Iceberg Kafka Connect sink zip from the Iceberg source (multi-stage build in the
-  Connect Dockerfile — it is not published as an artifact). Pick an Iceberg version whose REST
-  client supports the OAuth2 `scope` property.
-- [ ] Register the sink connector (design §5): `InsertField` SMT for `_topic` / `_partition` /
-  `_offset` / `_ingested_at`, static routing of the three topics, auto-create + schema
-  evolution, `day(_ingested_at)` partitioning, `format-version=2`, Polaris + S3 (RustFS) config.
+Steps (each records its result when done, so the phase can be followed step by step):
 
-**Done when:**
+| Step | What | Status |
+|---|---|---|
+| 4.1 | Choose the Iceberg version for the sink | Done 2026-11-03 |
+| 4.2 | Build the Iceberg sink into `custom-connect` (multi-stage Dockerfile) | Done 2026-11-03 |
+| 4.3 | Pass Polaris + S3 credentials to `kafka-connect`; write `connect/connectors/iceberg-bronze.json` (design §5) | Done 2026-11-03 |
+| 4.4 | Register through `connect-setup`, check the three bronze tables in Trino | Done 2026-11-03 |
+| 4.5 | Read bronze from Spark (Iceberg 1.5.2) via `helper.get_spark` | Done 2026-11-03 |
+| 4.6 | Docs, roadmap status, lessons learned | Done 2026-11-03 |
+
+### 4.1 — Iceberg version: **1.10.2** *(done)*
+
+Constraints: the `kafka-connect` worker runs **Java 11** (`cp-kafka-connect:7.6.0`, Zulu 11.0.21);
+the REST client must send the OAuth2 **`scope`** Polaris requires (`PRINCIPAL_ROLE:ALL`); tables
+must stay readable by Spark's Iceberg **1.5.2**.
+
+Findings (checked 2026-11-03 against Maven Central and the `apache-iceberg-1.10.2` tag):
+
+- **Java level** — read from the class files of each published jar:
+
+  | Iceberg | `iceberg-core` / `iceberg-kafka-connect` bytecode |
+  |---|---|
+  | 1.6.1 | Java 8 |
+  | 1.7.2 – **1.10.2** | **Java 11** |
+  | 1.11.0, 1.12.0 (latest) | Java 17 — would fail on the worker (`UnsupportedClassVersionError`) |
+
+  So **1.10.2 is the newest version that runs on Java 11**.
+- **OAuth2 scope** — `org.apache.iceberg.rest.auth.OAuth2Properties` in 1.10.2 has `scope`
+  (next to `credential`, `oauth2-server-uri`); the sink passes every `iceberg.catalog.*` property
+  to the catalog, so `iceberg.catalog.scope=PRINCIPAL_ROLE:ALL` reaches the REST client.
+- **Not published ready-to-use** — `iceberg-kafka-connect` (the connector jar) is on Maven Central,
+  but `iceberg-kafka-connect-runtime` (the plugin zip with all dependencies: Parquet, AWS SDK,
+  REST catalog…) is not. It must be built from source: `./gradlew -x test -x integrationTest
+  :iceberg-kafka-connect:iceberg-kafka-connect-runtime:distZip` → zip under
+  `kafka-connect/kafka-connect-runtime/build/distributions/` (two variants; the one without the
+  Hive metastore client is enough for a REST catalog).
+- **Source** — `https://archive.apache.org/dist/iceberg/apache-iceberg-1.10.2/apache-iceberg-1.10.2.tar.gz`,
+  SHA-512 `7eba5c85…65b9bd` (full value in the `.sha512` file next to it; the Dockerfile will
+  verify it). The release has no `gradle-wrapper.jar`; Iceberg's `gradlew` downloads it (Gradle
+  8.14.3).
+- **Build JDK** — the build accepts JDK 11, 17 or 21 and always compiles with `options.release = 11`,
+  so building on a JDK 17 image still yields Java 11 bytecode.
+- **Format** — tables are auto-created with `format-version=2` (design §5), which Spark's Iceberg
+  1.5.2 reads; 1.10 only writes v3 features (deletion vectors, row lineage) on v3 tables.
+
+Risks left for the next steps:
+
+- **Kafka API level** — 1.10.2 is compiled against Kafka **3.9.1**; the worker provides Kafka
+  **3.6** (`connect-api`/`kafka-clients` are compile-only, not bundled). Expected to work (the
+  Connect API is backward compatible), but only a real run proves it → 4.4.
+- **Transactional commits** — the sink commits Kafka offsets and Iceberg snapshots with a
+  transactional producer; the broker's transaction log is already at RF 1 (phase 1), otherwise
+  this would fail on a single broker → 4.4.
+- **Polaris + RustFS from the sink** — S3FileIO with path-style access and the RustFS endpoint, no
+  credential vending; same settings Trino and Spark already use → 4.4.
+
+### 4.2 — Build the sink into `custom-connect` *(done)*
+
+`connect/Dockerfile` is now multi-stage:
+
+1. **`iceberg-build`** (`eclipse-temurin:17.0.20_8-jdk-noble`): downloads the 1.10.2 source
+   release, checks its SHA-512, runs `./gradlew --no-daemon -x test -x integrationTest
+   :iceberg-kafka-connect:iceberg-kafka-connect-runtime:distZip` and unpacks the zip (with `jar xf`
+   — the JDK image has no `unzip`). Gradle's downloads sit in a BuildKit cache mount
+   (`/root/.gradle`), not in the image.
+2. **Connect worker** (`cp-kafka-connect:7.6.0`): Debezium as before, plus
+   `COPY --from=iceberg-build` of the plugin directory into
+   `/usr/share/confluent-hub-components/iceberg-kafka-connect-runtime-1.10.2/` (owned by
+   `appuser`). Each plugin directory gets its own class loader, so Iceberg's and Debezium's jars
+   don't clash.
+
+Results (2026-11-03):
+
+- First build **~6.5 min** (Gradle ~5.5 min: it downloads its dependencies and compiles the needed
+  Iceberg modules). Later builds reuse the Docker layer cache — the stage only reruns when the
+  version/checksum args change. Image `custom-connect:7.6.0`: 3.26 GB (the Confluent base image is
+  most of it).
+- Plugin: 257 jars, 181 MB. **No `kafka-clients` / `connect-api` bundled** → the sink runs on the
+  worker's Kafka 3.6 libraries (the API-level risk from 4.1 is still open until 4.4).
+- **Bytecode scan of all 257 jars** (highest class-file version per jar, ignoring
+  `META-INF/versions`): Java 3–8: 235 jars, Java 11: 15 jars, **above Java 11: none** — the
+  dependencies (AWS SDK 2.33, Parquet 1.16…) are fine on the worker's Java 11 too.
+- Worker restarted with the new image: `GET /connector-plugins` lists
+  `org.apache.iceberg.connect.IcebergSinkConnector 1.10.2 sink` next to Debezium; the log shows the
+  plugin loaded (plus its transforms `DebeziumTransform`, `KafkaMetadataTransform`…); `source-shop`
+  is still `RUNNING` (offsets kept, no new snapshot).
+
+### 4.3 — Sink config and credentials *(done)*
+
+- **`connect/connectors/iceberg-bronze.json`** (connector `iceberg-bronze`): design §5 as is, plus
+  `tasks.max=1` and an explicit control topic `control-iceberg` (the sink's coordination topic;
+  auto-created on first start). Every property name was checked against the 1.10.2 reference
+  (`docs/docs/kafka-connect.md` at tag `apache-iceberg-1.10.2`).
+- **Secrets stay `${env:...}`**: `compose/connect.yml` now passes `POLARIS_SECRET`, `S3_ENDPOINT`,
+  `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` from `.env` into `kafka-connect`; the JSON only
+  names them (`"iceberg.catalog.credential": "root:${env:POLARIS_SECRET}"` — a provider reference
+  works inside a longer string).
+- **Startup order**: `connect-setup` now also waits for `polaris-setup` (catalog `lakehouse` +
+  namespace `bronze`, which itself waits for the RustFS bucket).
+
+Results (2026-11-03), without registering the connector yet:
+
+- Inside `kafka-connect`: the five variables are set; a Polaris OAuth2 token request with
+  `scope=PRINCIPAL_ROLE:ALL` → HTTP 200 with an `access_token`; `GET ${S3_ENDPOINT}/health` → 200.
+- `PUT /connector-plugins/IcebergSinkConnector/config/validate` with the JSON →
+  **`error_count = 0`** over 48 checked settings (connector, converters and the `InsertField`
+  transform).
+- `GET /connectors` still lists only `source-shop`. Note: the next run of `connect-setup` registers
+  every `connect/connectors/*.json`, i.e. it starts the sink — that is step 4.4.
+
+### 4.4 — Register and check in Trino *(done)*
+
+`docker compose up -d --force-recreate connect-setup` → `Connector iceberg-bronze created` +
+`RUNNING`. Results (2026-11-03):
+
+- **Tables**: the sink auto-created `bronze.users_cdc` / `orders_cdc` / `order_details_cdc` in
+  Polaris at its first records (`SHOW TABLES FROM lakehouse.bronze`): `before`/`after`/`source`
+  as nested rows, `op`, `ts_ms`, the four `_` metadata columns, Parquet, `format_version = 2`,
+  `partitioning = ARRAY['day(_ingested_at)']`, location `s3://data-platform/bronze/<table>`.
+- **Catch-up**: the group `connect-iceberg-bronze` had no offset, so the sink read the topics from
+  the start (snapshot `r` events included). First data commit ~95 s after start (the first two
+  commits hit the 30 s timeout while the worker was still loading tables, and committed nothing).
+- **Steady state** (generator on): a commit every ~60 s, each done in under 2 s and touching all
+  three tables (`valid-through` = commit time); one `append` snapshot per commit; one ~23 KB
+  Parquet file per table per commit. When the topics are idle, commits time out after 30 s and
+  commit nothing — harmless.
+- **Exactly-once, including a restart**: `kafka-connect` was restarted mid-stream; afterwards, per
+  table, bronze rows = Kafka messages = distinct `_offset` values, offsets contiguous from 0 (users
+  139, orders 837, order_details 1359), consumer lag 0.
+- **Bronze = source**: rebuilding the current state from bronze (last event per key by
+  `source.lsn`, deletes dropped) gives exactly the source tables — same keys and `updated_at` for
+  89 users, 401 orders, 1237 order lines.
+- The three open risks from 4.1 are closed: Kafka 3.9-built sink on the 3.6 worker, transactional
+  commits on one broker, Polaris OAuth2 scope + RustFS from the sink — all work.
+- Two startup warnings removed by setting `iceberg.catalog.rest.auth.type=oauth2` and
+  `iceberg.catalog.oauth2-server-uri` explicitly (Iceberg 1.10 inferred both).
+- Types: money is `decimal(38,2)` in bronze (the sink keeps the scale, not the Avro precision 18);
+  timestamps inside `before`/`after` stay ISO-8601 strings; `_ingested_at` is
+  `timestamp(6) with time zone` = the Kafka record time.
+
+### 4.5 — Read from Spark *(done)*
+
+A throwaway script (`get_spark` + `spark.table("lakehouse.bronze.<table>")`, submitted with
+`/opt/spark/bin/spark-submit --py-files /opt/spark/jobs/helper.py`) ran on the cluster
+(`spark://spark-master:7077`) with Iceberg **1.5.2**: all three tables readable, counts equal to
+Trino, `format-version=2`, nested structs and `Decimal` values intact, `op` counts c 249 / d 22 /
+r 174 / u 392 for orders. Tables written by Iceberg 1.10.2 at v2 are readable by 1.5.2.
+
+### 4.6 — Docs *(done)*
+
+Design §4.3 (decimal in bronze) and §5 (final sink JSON, commit mechanics, consumer groups,
+`_ingested_at` meaning), `docs/services.md` ("Checking bronze"), `CLAUDE.md`, this roadmap.
+Cleanup: the Iceberg namespaces `silver` and `gold` (created by `polaris-setup` since the old
+all-Iceberg design, always empty) were dropped and `polaris/scripts/init.sh` now creates only
+`bronze` — silver lives in Postgres and gold in ClickHouse, so the catalog shows only what is on
+Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
+
+**Done when** (whole phase):
 - `SHOW TABLES FROM lakehouse.bronze` in Trino → `users_cdc`, `orders_cdc`, `order_details_cdc`.
 - `SELECT op, after.order_id, source.lsn FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20`
   returns recent events, and new rows appear about every minute (commit interval).
 - `SELECT * FROM lakehouse.bronze."orders_cdc$snapshots"` shows one `append` snapshot per commit.
 - Spark (Iceberg 1.5.2) can read a bronze table via `helper.get_spark`.
+
+**Lessons learned:**
+- Read the bytecode, not the release notes: scanning class-file versions of the published jars
+  (and later of all 257 bundled jars) answered "does it run on Java 11?" with certainty.
+- A plugin's dependencies matter as much as the plugin: the runtime zip bundles Parquet, AWS SDK,
+  Hadoop… but deliberately not Kafka — it runs on the worker's Kafka libraries.
+- `validate` before `create`: Connect's `PUT /connector-plugins/<class>/config/validate` catches
+  config mistakes without starting anything; connectivity (Polaris token, S3) can be checked from
+  inside the worker container with the same env variables.
+- Wait on the right condition: twice a check waited on the wrong thing (old commit lines in the
+  log, a snapshot count a table never reaches because a commit skipped it). Wait on what you
+  actually need (bronze count = Kafka end offset), not on a proxy.
+- Commit timeouts in the log are not errors: an idle or just-started sink times out and commits
+  nothing; data is never lost because Kafka offsets only move with a successful Iceberg commit.
+- Exactly-once into Iceberg holds through a restart (no gap, no duplicate `_offset`); duplicates
+  can only come from upstream (Debezium at-least-once) — silver still dedups.
+- Streaming into Iceberg makes many small files (one per table per commit): fine for a demo,
+  compaction is phase 8's job.
+- Python 3.8 in the Spark image: an f-string expression cannot contain a backslash.
 
 ## Phase 5 — Silver
 

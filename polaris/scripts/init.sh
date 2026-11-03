@@ -1,5 +1,7 @@
 #!/bin/sh
-# Initialize Polaris: get token -> create/update catalog `lakehouse` -> create namespaces bronze/silver/gold.
+# Initialize Polaris: get token -> create/update catalog `lakehouse` -> create namespace bronze.
+# Only bronze lives on Iceberg: silver is in Postgres `data-platform`, gold in ClickHouse
+# (docs/dataplatform-design.md), so no silver/gold namespaces here.
 # Idempotent: safe to re-run (409 = already exists -> update catalog / skip namespace).
 # Checks the HTTP code at every step — `curl -s` doesn't fail on HTTP 4xx/5xx, which is why the
 # script used to print "created" even when Polaris answered 404.
@@ -94,7 +96,7 @@ else
 fi
 
 # --- namespaces (Iceberg REST: POST /v1/{prefix}/namespaces) ---
-for NS in bronze silver gold; do
+for NS in bronze; do
   req POST "${REST}/namespaces" "{\"namespace\": [\"${NS}\"], \"properties\": {}}"
   case "$CODE" in
     2??) echo "Namespace '${NS}' created." ;;

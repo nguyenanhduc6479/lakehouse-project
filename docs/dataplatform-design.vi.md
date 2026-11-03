@@ -62,7 +62,7 @@ nguồn bên ngoài).
 |---|---|---|
 | `source-db` (Postgres 16) | OLTP giả lập: `users`, `orders`, `order_details` | Instance riêng (`compose/source.yml`), database `source-db`, host port 5433, `wal_level=logical` |
 | `generator.py` | Liên tục insert/update/delete vào nguồn | Python + Faker + psycopg, chỉnh được tốc độ |
-| Kafka Connect | Chạy Debezium (source) và Iceberg sink | Image tự build trên `confluentinc/cp-kafka-connect` (có sẵn AvroConverter) + plugin Debezium Postgres + file zip Iceberg sink (không được publish thành artifact — build từ source Iceberg trong Dockerfile multi-stage) |
+| Kafka Connect | Chạy Debezium (source) và Iceberg sink | Image tự build trên `confluentinc/cp-kafka-connect` (có sẵn AvroConverter) + plugin Debezium Postgres + file zip Iceberg sink (không được publish thành artifact — build từ source Iceberg trong Dockerfile multi-stage; **Iceberg 1.10.2**, bản mới nhất chạy được trên Java 11 của worker) |
 | Kafka UI | Xem bên trong Kafka: topic, message đã giải mã Avro, schema, connector (chỉ đọc) | `kafbat/kafka-ui`, port host 8082 |
 | Kafka (+ Zookeeper) | Vận chuyển event Avro | Đã có trong `compose/infra.yml` |
 | Schema Registry | Lưu schema Avro, kiểm tra tương thích | Đã có trong `compose/infra.yml` |
@@ -234,7 +234,7 @@ rồi job chờ tới khi connector và task của nó `RUNNING`.
 | `bigint` | `long` | |
 | `integer`, `smallint` | `int` | Avro không có kiểu short |
 | `varchar`, `text` | `string` | |
-| `numeric(18,2)` | `bytes` + logical type `decimal` | Chính xác, nhờ chế độ `precise` |
+| `numeric(18,2)` | `bytes` + logical type `decimal` | Chính xác, nhờ chế độ `precise`; trong bronze thành `decimal(38,2)` (sink giữ scale nhưng không giữ precision) |
 | `timestamptz` | `string` (`io.debezium.time.ZonedTimestamp`, ISO-8601) | Parse thành timestamp |
 
 ### 4.4. Envelope
@@ -276,11 +276,12 @@ SMT `InsertField` có sẵn của Kafka thêm `_topic`, `_partition`, `_offset` 
 timestamp dạng `long` thường, trong khi partition transform `day()` của Iceberg cần timestamp thật.
 Các bảng được partition theo `day(_ingested_at)`.
 
-Cấu hình sink connector:
+Cấu hình sink connector (`connect/connectors/iceberg-bronze.json`, connector `iceberg-bronze`):
 
 ```json
 {
   "connector.class": "org.apache.iceberg.connect.IcebergSinkConnector",
+  "tasks.max": "1",
   "topics": "src.shop.users,src.shop.orders,src.shop.order_details",
   "key.converter": "io.confluent.connect.avro.AvroConverter",
   "key.converter.schema.registry.url": "http://schema-registry:8081",
@@ -303,11 +304,14 @@ Cấu hình sink connector:
   "iceberg.tables.evolve-schema-enabled": "true",
   "iceberg.tables.default-partition-by": "day(_ingested_at)",
   "iceberg.tables.auto-create-props.format-version": "2",
+  "iceberg.control.topic": "control-iceberg",
   "iceberg.control.commit.interval-ms": "60000",
 
   "iceberg.catalog.type": "rest",
   "iceberg.catalog.uri": "http://polaris:8181/api/catalog",
   "iceberg.catalog.warehouse": "lakehouse",
+  "iceberg.catalog.rest.auth.type": "oauth2",
+  "iceberg.catalog.oauth2-server-uri": "http://polaris:8181/api/catalog/v1/oauth/tokens",
   "iceberg.catalog.credential": "root:${env:POLARIS_SECRET}",
   "iceberg.catalog.scope": "PRINCIPAL_ROLE:ALL",
   "iceberg.catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
@@ -323,13 +327,30 @@ Cấu hình sink connector:
   map đúng vào một bảng).
 - `format-version=2`: Spark cluster chạy Iceberg 1.5.2, không đọc được bảng v3 mà một sink mới hơn
   có thể tạo ra.
-- `commit.interval-ms=60000`: mặc định là 5 phút; một phút giúp demo phản hồi nhanh hơn.
-- Việc ghi vào Iceberg là exactly-once (Kafka offset được commit cùng với Iceberg snapshot). Bản
+- `commit.interval-ms=60000`: mặc định là 5 phút; một phút giúp demo phản hồi nhanh hơn. Mỗi lần
+  commit có dữ liệu thêm một snapshot `append` và một file Parquet cho mỗi bảng mỗi ngày (~20 KB mỗi
+  file ở tốc độ demo) — rất nhiều file nhỏ, phase 8 sẽ compact.
+- `rest.auth.type=oauth2` + `oauth2-server-uri`: nếu không khai báo, Iceberg 1.10 tự suy ra cả hai và
+  log cảnh báo rằng cơ chế tự suy ra token endpoint sẽ bị bỏ ở bản sau.
+- Việc ghi vào Iceberg là exactly-once (Kafka offset được commit cùng với Iceberg snapshot; đã kiểm
+  tra bằng cách restart Kafka Connect giữa lúc đang ghi — không thiếu, không trùng `_offset`). Bản
   trùng vẫn có thể xuất hiện vì bản thân Debezium là at-least-once: sau khi crash, nó gửi lại các
   event kể từ LSN được flush cuối cùng. Silver xử lý chuyện đó (§6.2).
+- Cách một lần commit diễn ra: coordinator (task giữ partition 0 của topic đầu tiên) gửi
+  `START_COMMIT` lên control topic `control-iceberg` mỗi chu kỳ; mỗi worker trả lời bằng danh sách
+  file nó đã ghi; coordinator commit chúng thành một snapshot cho mỗi bảng. Quan sát được: khi có
+  dữ liệu chảy qua, một lần commit xong trong dưới 2 giây; khi các topic không có dữ liệu mới (và
+  ngay sau khi khởi động) nó chờ hết `commit.timeout-ms` (30 giây), log `Commit timeout reached` và
+  commit những gì đã nhận — thường là không có gì. Vô hại: không mất gì, lần commit sau sẽ lấy tiếp.
+- Consumer group trong Kafka UI: `connect-iceberg-bronze` (các topic dữ liệu; offset chỉ tiến khi
+  commit Iceberg thành công), `connect-iceberg-bronze-coord` và `cg-control-*` (control topic).
+- `_ingested_at` là timestamp của record Kafka, tức lúc Debezium tạo event — không phải lúc sink ghi.
+  Vì vậy các dòng của lần đọc bù đầu tiên mang thời điểm gốc của chúng.
 
 Bronze truy vấn được từ Trino ngay, ví dụ
 `SELECT op, after.order_id, source.lsn FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20`.
+Các cột thời gian bên trong `before`/`after` vẫn là chuỗi ISO-8601 (`ZonedTimestamp`, §4.3); silver
+sẽ parse.
 
 ## 6. Silver — SCD Type 2 trên Postgres
 
