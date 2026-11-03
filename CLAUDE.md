@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A **demo CDC data platform** on Docker Compose, built to learn how the pieces fit together — not a
 production system. Full design: **`docs/dataplatform-design.md`** (read it before building a new
-phase); build order and per-phase checks: **`docs/roadmap.md`** (keep its Status column current). The target flow:
+phase); build order and per-phase checks: **`docs/roadmap.md`** (at the end of each phase: Status column, what was built, **Lessons learned**). The target flow:
 
 ```
 generator.py → source-db (Postgres, wal_level=logical)
@@ -186,6 +186,11 @@ Generator (profile `generator`; `docker compose build` without the profile skips
 docker compose --profile generator build generator
 docker compose --profile generator up -d generator   # start writing into source-db
 docker compose stop generator                        # stop (clean, ~1 s)
+
+# or straight from the host venv (logs only in the terminal, not in Grafana):
+set -a && . ./.env && set +a
+PGHOST=localhost PGPORT=5433 PGUSER="$SOURCE_POSTGRES_USER" PGPASSWORD="$SOURCE_POSTGRES_PASSWORD" \
+  PGDATABASE="$SOURCE_POSTGRES_DB" venv/bin/python source/generator.py --rate 2   # Ctrl+C stops
 ```
 
 `spark-submit` is not on the container PATH — use `/opt/spark/bin/spark-submit`, e.g.

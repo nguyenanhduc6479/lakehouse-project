@@ -2,7 +2,8 @@
 
 Thứ tự xây dựng data platform được mô tả trong [dataplatform-design.md](dataplatform-design.md).
 Mỗi phase kết thúc bằng một thứ nhìn thấy được là đang chạy. Chỉ bắt đầu phase mới khi các mục
-**Hoàn thành khi** của phase trước đã đạt. Bản tiếng Anh: [roadmap.md](roadmap.md).
+**Hoàn thành khi** của phase trước đã đạt. Phase đã xong ghi lại những gì đã làm và mục
+**Rút ra được**. Bản tiếng Anh: [roadmap.md](roadmap.md).
 
 | # | Phase | Trạng thái |
 |---|---|---|
@@ -40,6 +41,18 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   (TCP + mức ứng dụng: các connection của Airflow, OAuth2 của Polaris, gửi/nhận Kafka, ghi Schema
   Registry); đã sửa `trino_conn` (thiếu user → HTTP 401).
 
+**Rút ra được:**
+- Kiểm tra cấu hình có thực sự có hiệu lực, không chỉ xem service có chạy: job Spark qua REST chạy
+  `local[*]` mà không báo lỗi, Polaris chạy in-memory nếu không cấu hình persistence, và `curl -s`
+  vẫn trả exit 0 khi gặp HTTP 4xx/5xx.
+- Thu thập log không được phụ thuộc vào thời điểm: discovery qua Docker API bỏ sót các job one-shot
+  kết thúc dưới một giây; đọc file log json-file của Docker và cho mọi service chờ Alloy thì không
+  sót dòng nào.
+- Pin phiên bản và chuẩn bị cho việc upstream thay đổi: MinIO ngừng phát hành image; nhờ mọi engine
+  dùng chung tên biến `S3_*` nên chuyển sang RustFS chỉ phải sửa một file.
+- Bind mount từng file sẽ hỏng khi editor thay file mới: dùng `up -d --force-recreate`, không dùng
+  `restart`.
+
 ## Phase 2 — Nguồn *(xong)*
 
 **Mục tiêu:** một database OLTP Postgres thay đổi liên tục và sẵn sàng cho CDC.
@@ -69,6 +82,26 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   xem bằng DataGrip / `psql`.
 - `SELECT * FROM pg_publication_tables WHERE pubname = 'dbz_publication'` liệt kê đủ ba bảng.
 - `\du debezium` có thuộc tính `Replication`.
+
+**Rút ra được:**
+- CDC chỉ thấy các transaction đã commit. Kết nối psycopg thiếu `autocommit=True` giữ một
+  transaction ngầm suốt lúc chạy, nên Debezium sẽ không nhận được gì cho tới khi generator thoát.
+  Phải biết mỗi transaction thực sự kết thúc ở đâu.
+- Ranh giới transaction ở nguồn quyết định độ nhất quán ở downstream: một đơn hàng (`orders` +
+  `order_details`) là một transaction nhưng nằm ở hai topic — chấp nhận có chủ đích, silver
+  eventually consistent giữa các bảng.
+- Cấu hình CDC nằm ở hai mức: instance (`wal_level`, giới hạn WAL của slot — vì vậy tách
+  `source-db` riêng) và bảng (replica identity, publication). Không phải cột nào cũng đi qua WAL:
+  generated column không được gửi trước PostgreSQL 18, nên `line_total` là cột thường.
+- Script setup chạy lại mỗi lần `up` nên phải idempotent; Postgres không có `IF NOT EXISTS` cho role
+  và publication (`SELECT format(...) WHERE NOT EXISTS ... \gexec`). Secret truyền vào bằng biến
+  psql, và biến này không được thay thế bên trong `DO $$`.
+- Kiểm tra đúng đường đi thật: trong container Postgres đăng nhập qua `localhost` được trust, sai
+  mật khẩu vẫn vào được — phải test qua network (`-h source-db`).
+- Python chạy làm PID 1 sẽ bỏ qua SIGTERM nếu không tự xử lý; phải nhìn tận mắt dữ liệu sinh ra chứ
+  không chỉ đếm số dòng (Faker `vi_VN.first_name()` chỉ trả về "John"/"Jane").
+- `timestamptz` lưu một thời điểm tuyệt đối; múi giờ chỉ là cách client hiển thị (DataGrip hiện +00
+  trong khi server là `Asia/Ho_Chi_Minh` — sửa ở client, không sửa dữ liệu).
 
 ## Phase 3 — CDC
 
@@ -185,6 +218,7 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - Pin mọi image và thư viện mới vào một phiên bản cụ thể.
 - Mọi service mới phải có `logging: *default-logging` và phải chờ `alloy` (trực tiếp hoặc thông
   qua các service nó phụ thuộc), nếu không log của nó sẽ không có trên Grafana.
-- Cập nhật `CLAUDE.md` và cột **Trạng thái** ở trên khi kết thúc mỗi phase.
+- Khi kết thúc mỗi phase: cập nhật cột **Trạng thái**, đánh dấu các mục của phase theo những gì
+  thực sự đã làm và đã kiểm tra, thêm danh sách **Rút ra được**, và cập nhật `CLAUDE.md`.
 - Dùng Grafana (3000) → "Container logs" để debug bất kỳ service nào; log của job Spark nằm
   dưới `service=spark-job`.

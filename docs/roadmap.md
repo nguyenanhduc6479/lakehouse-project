@@ -2,7 +2,7 @@
 
 The build order for the data platform described in [dataplatform-design.md](dataplatform-design.md).
 Each phase ends with something you can see working; don't start a phase before the previous one's
-**Done when** checks pass. Vietnamese version: [roadmap.vi.md](roadmap.vi.md).
+**Done when** checks pass. A finished phase records what was built and its **Lessons learned**. Vietnamese version: [roadmap.vi.md](roadmap.vi.md).
 
 | # | Phase | Status |
 |---|---|---|
@@ -40,6 +40,17 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   (TCP + app-level: Airflow connections, Polaris OAuth2, Kafka round-trip, Schema Registry write);
   `trino_conn` fixed (it had no user → HTTP 401).
 
+**Lessons learned:**
+- Check that a setting really took effect, not just that the service is up: Spark REST jobs ran
+  in `local[*]` without any error, Polaris runs in-memory unless persistence is set, and
+  `curl -s` exits 0 on HTTP 4xx/5xx.
+- Log collection must not depend on timing: Docker-API discovery missed one-shot jobs that exit
+  in under a second; tailing Docker's json-file logs and gating startup on Alloy catches everything.
+- Pin versions and expect upstreams to change: MinIO stopped publishing images; keeping every
+  engine on the same `S3_*` names made the switch to RustFS a one-file change.
+- Single-file bind mounts break when an editor replaces the file: `up -d --force-recreate`, not
+  `restart`.
+
 ## Phase 2 — Source *(done)*
 
 **Goal:** a Postgres OLTP database that changes continuously and is ready for CDC.
@@ -69,6 +80,26 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   DataGrip / `psql`.
 - `SELECT * FROM pg_publication_tables WHERE pubname = 'dbz_publication'` lists the three tables.
 - `\du debezium` shows the `Replication` attribute.
+
+**Lessons learned:**
+- CDC only sees committed transactions. A psycopg connection without `autocommit=True` kept one
+  implicit transaction open, so nothing would reach Debezium until the generator exited. Know where
+  each transaction really ends.
+- Transaction boundaries at the source drive downstream consistency: one order (`orders` +
+  `order_details`) is one transaction but lands in two topics — accepted on purpose, silver is
+  eventually consistent across tables.
+- CDC settings live at two levels: instance (`wal_level`, slot WAL retention — hence a separate
+  `source-db`) and table (replica identity, publication). Not every column travels through WAL:
+  generated columns don't before PostgreSQL 18, so `line_total` is a plain column.
+- Setup scripts run on every `up`, so they must be idempotent; Postgres lacks `IF NOT EXISTS` for
+  roles and publications (`SELECT format(...) WHERE NOT EXISTS ... \gexec`). Secrets go in as psql
+  variables, which are not substituted inside `DO $$`.
+- Test the real path: inside the Postgres container `localhost` logins are trusted, so a wrong
+  password still works — test over the network (`-h source-db`).
+- Python as PID 1 ignores SIGTERM unless it handles it; look at generated data, not just counts
+  (Faker `vi_VN.first_name()` only returns "John"/"Jane").
+- `timestamptz` stores an instant; the time zone is only how a client displays it (DataGrip showed
+  +00 while the server was `Asia/Ho_Chi_Minh` — fix the client, not the data).
 
 ## Phase 3 — CDC
 
@@ -184,6 +215,7 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - Pin every new image and library to an explicit version.
 - Every new service gets `logging: *default-logging` and waits (directly or through its
   dependencies) for `alloy`, otherwise its logs are missing from Grafana.
-- Keep `CLAUDE.md` and the **Status** column above current at the end of each phase.
+- At the end of each phase: update the **Status** column, tick the phase's items with what was
+  actually built and verified, add a **Lessons learned** list, and keep `CLAUDE.md` current.
 - Use Grafana (3000) → "Container logs" to debug any service; Spark job logs are under
   `service=spark-job`.

@@ -151,7 +151,8 @@ sách cố định, để dữ liệu sạch. Hai chi tiết quan trọng cho CD
 **autocommit**, nên mỗi hành động là một transaction được commit riêng (nếu không, transaction ngầm
 của psycopg biến mọi hành động thành savepoint và không có gì được commit cho tới khi generator
 dừng); và nó xử lý `SIGTERM` (chạy làm PID 1 thì mặc định sẽ bỏ qua tín hiệu này), nên
-`docker compose stop` dừng gọn sau hành động đang chạy.
+`docker compose stop` dừng gọn sau hành động đang chạy. Cách chạy — trong container hoặc trực
+tiếp bằng Python — có trong [services.md](services.md#running-the-generator).
 
 ## 4. Event: Avro + Schema Registry
 

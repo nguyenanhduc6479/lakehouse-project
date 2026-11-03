@@ -90,6 +90,44 @@ Not started by `docker compose up`; not counted in the 22 services above.
 |---|---|---|
 | `generator` | Writes shop activity into `source-db` (`GENERATOR_RATE` events/s, default 2) | `docker compose --profile generator up -d generator` / `docker compose stop generator` |
 
+### Running the generator
+
+The generator is one Python file, `source/generator.py`. Run it either way — the logic is the
+same; don't run both at once (the write rates add up).
+
+**In a container** (runs in the background, logs in Grafana under `service=generator`):
+
+```bash
+docker compose --profile generator build generator   # first time, or after editing source/generator.py
+docker compose --profile generator up -d generator   # start
+docker compose stop generator                        # stop (clean, ~1 s)
+```
+
+**Directly with Python** from the repo root in WSL (quick tests, debugging; logs only in the
+terminal, not in Grafana — Alloy only collects container logs):
+
+```bash
+uv pip install --python venv/bin/python --group dev  # once: faker + psycopg are in the dev group
+
+set -a && . ./.env && set +a                         # load .env into this shell
+export PGHOST=localhost PGPORT=5433 \
+       PGUSER="$SOURCE_POSTGRES_USER" PGPASSWORD="$SOURCE_POSTGRES_PASSWORD" \
+       PGDATABASE="$SOURCE_POSTGRES_DB"              # source-db as seen from the host
+
+venv/bin/python source/generator.py                  # 2 events/s until Ctrl+C (clean stop)
+```
+
+The `export`s only last for that terminal. Options (same for both ways; in the container they go
+after the service name, e.g. `docker compose --profile generator run --rm generator --rate 10`):
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--rate` | Events per second | 2 |
+| `--max-events` | Stop after N events (0 = run forever) | 0 |
+| `--seed-users` | Create users until at least this many exist | 20 |
+| `--seed` | Random seed, for a reproducible sequence of actions | random |
+| `--log-level` | `DEBUG`, `INFO`, `WARNING` | `INFO` |
+
 ## Not built yet
 
 Planned by the [roadmap](roadmap.md), ports not assigned yet: Kafka Connect (Debezium + Iceberg

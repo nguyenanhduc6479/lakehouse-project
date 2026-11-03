@@ -6,8 +6,15 @@ order (cascades to its lines) — so Debezium sees inserts, updates and deletes 
 
 Connection comes from the standard libpq env vars (PGHOST, PGPORT, PGUSER, PGPASSWORD,
 PGDATABASE), set by the `generator` service in compose/source.yml. Run by hand:
-    docker compose --profile generator up -d generator     # start
+    docker compose --profile generator up -d generator     # start (container)
     docker compose stop generator                          # stop
+or directly on the host (repo root, WSL; source-db is published on localhost:5433):
+    set -a && . ./.env && set +a
+    PGHOST=localhost PGPORT=5433 PGUSER="$SOURCE_POSTGRES_USER" \
+    PGPASSWORD="$SOURCE_POSTGRES_PASSWORD" PGDATABASE="$SOURCE_POSTGRES_DB" \
+    venv/bin/python source/generator.py --rate 2           # Ctrl+C to stop
+Options: --rate, --max-events, --seed-users, --seed, --log-level (see --help); full guide in
+docs/services.md ("Running the generator").
 Pure helpers (line totals, status transitions, order lines, emails) have no DB access and are
 unit-tested in tests/test_generator.py.
 """

@@ -146,7 +146,8 @@ the data stays clean. Two details that matter for CDC: the connection runs in **
 so every action is its own committed transaction (without it, psycopg's implicit transaction
 turns every action into a savepoint and nothing is committed until the generator stops); and it
 handles `SIGTERM` (as PID 1 it would otherwise ignore it), so `docker compose stop` ends cleanly
-after the current action.
+after the current action. How to run it — in a container or directly with Python — is in
+[services.md](services.md#running-the-generator).
 
 ## 4. Events: Avro + Schema Registry
 
