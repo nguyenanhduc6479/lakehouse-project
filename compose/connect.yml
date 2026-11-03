@@ -1,0 +1,125 @@
+# Kafka Connect: runs Debezium (source-db -> Kafka topics src.shop.*, Avro via Schema Registry) and,
+# from phase 4, the Iceberg sink (Kafka -> bronze). One distributed-mode worker; connectors are
+# registered by the one-shot connect-setup job, never by hand.
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  kafka-connect:
+    build:
+      context: ../connect
+      dockerfile: Dockerfile
+    image: custom-connect:7.6.0
+    container_name: kafka-connect
+    logging: *default-logging
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: connect-cluster
+      # where the worker keeps connector configs, source offsets (Debezium's LSN position) and
+      # status; single broker -> replication factor 1 (the default 3 would fail to create them)
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # worker defaults; each connector config also sets its converters explicitly
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # connector configs read secrets as ${env:VAR} from this container's environment
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx1g"
+      SOURCE_POSTGRES_DB: ${SOURCE_POSTGRES_DB}
+      SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD: ${SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD}
+      TZ: ${TZ}
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+      # the REST API takes ~30-60 s to come up; probe often meanwhile so connect-setup starts early
+      start_interval: 3s
+
+  # One-shot: registers connect/connectors/*.json through the Connect REST API and waits until they
+  # are RUNNING (connect/scripts/init.sh). Idempotent. Runs on the Connect image only because it
+  # already has curl + bash.
+  connect-setup:
+    image: custom-connect:7.6.0
+    container_name: connect-setup
+    logging: *default-logging
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+      # Debezium needs the publication and the debezium role
+      source-db-setup:
+        condition: service_completed_successfully
+    environment:
+      CONNECT_HOST: kafka-connect
+      CONNECT_PORT: 8083
+    volumes:
+      - ../connect/scripts:/scripts:ro
+      - ../connect/connectors:/connectors:ro
+    entrypoint: ["bash", "/scripts/init.sh"]
+    # the image's own healthcheck probes a Connect worker, which this container isn't
+    healthcheck:
+      disable: true
+    networks: [lakehouse]
+
+  # Web UI to look inside Kafka: topics, messages (Avro decoded through Schema Registry), schemas,
+  # consumer groups and the Connect connectors. Read-only: connectors are managed by connect-setup
+  # and topics by their producers, never by hand. No login (local demo).
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.5.0
+    container_name: kafka-ui
+    logging: *default-logging
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: lakehouse
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: kafka-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+      # decode the CDC topics as Avro by default (otherwise the UI preselects String = raw bytes)
+      KAFKA_CLUSTERS_0_SERDE_0_NAME: SchemaRegistry
+      KAFKA_CLUSTERS_0_SERDE_0_TOPICKEYSPATTERN: "src\\..*"
+      KAFKA_CLUSTERS_0_SERDE_0_TOPICVALUESPATTERN: "src\\..*"
+      KAFKA_CLUSTERS_0_READONLY: "true"
+      # clusters come only from this environment, not from edits in the UI
+      DYNAMIC_CONFIG_ENABLED: "false"
+      JAVA_OPTS: "-Xms128m -Xmx512m"
+      TZ: ${TZ}
+    ports: ["8082:8080"]      # 8080 on host is Trino
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+      start_interval: 3s
+
+networks:
+  lakehouse:
+    driver: bridge

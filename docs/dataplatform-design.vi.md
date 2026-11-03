@@ -63,6 +63,7 @@ nguồn bên ngoài).
 | `source-db` (Postgres 16) | OLTP giả lập: `users`, `orders`, `order_details` | Instance riêng (`compose/source.yml`), database `source-db`, host port 5433, `wal_level=logical` |
 | `generator.py` | Liên tục insert/update/delete vào nguồn | Python + Faker + psycopg, chỉnh được tốc độ |
 | Kafka Connect | Chạy Debezium (source) và Iceberg sink | Image tự build trên `confluentinc/cp-kafka-connect` (có sẵn AvroConverter) + plugin Debezium Postgres + file zip Iceberg sink (không được publish thành artifact — build từ source Iceberg trong Dockerfile multi-stage) |
+| Kafka UI | Xem bên trong Kafka: topic, message đã giải mã Avro, schema, connector (chỉ đọc) | `kafbat/kafka-ui`, port host 8082 |
 | Kafka (+ Zookeeper) | Vận chuyển event Avro | Đã có trong `compose/infra.yml` |
 | Schema Registry | Lưu schema Avro, kiểm tra tương thích | Đã có trong `compose/infra.yml` |
 | RustFS (S3) + Iceberg | Bronze: change event chỉ ghi thêm (append-only) | Đã có trong stack (`rustfs/rustfs:1.0.4`, thay cho MinIO) |
@@ -172,11 +173,12 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
 ```json
 {
   "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
   "database.hostname": "source-db",
   "database.port": "5432",
-  "database.dbname": "source-db",
+  "database.dbname": "${env:SOURCE_POSTGRES_DB}",
   "database.user": "debezium",
-  "database.password": "${env:SOURCE_DB_DEBEZIUM_PASSWORD}",
+  "database.password": "${env:SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD}",
   "plugin.name": "pgoutput",
   "publication.name": "dbz_publication",
   "publication.autocreate.mode": "disabled",
@@ -202,9 +204,17 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
 - `timestamptz` luôn được map thành chuỗi `ZonedTimestamp`; `time.precision.mode` chỉ ảnh hưởng
   `timestamp`/`time` không có múi giờ, thứ schema không dùng, nên giữ mặc định.
 - Lần khởi động đầu, Debezium snapshot các dòng đang có (event với `op = r`), sau đó stream WAL.
+- Debezium **2.7.4.Final**: image gốc `cp-kafka-connect:7.6.0` chạy Java 11, còn Debezium 3.x cần
+  Java 17. File tarball của plugin tải từ Maven Central, có kiểm tra checksum, trong
+  `connect/Dockerfile`.
+- Generator ghi một đơn hàng bằng INSERT + UPDATE (`total_amount` được gán sau khi có các dòng chi
+  tiết) trong cùng một transaction, nên một đơn mới sinh ra một event `c` và một event `u` cùng
+  `txId` — lý do silver chỉ giữ event cuối của mỗi khóa trong một transaction (§6.2).
 
-Các connector được đăng ký bởi một setup job chạy một lần qua Kafka Connect REST API (cùng pattern
-với các job `*-setup` khác: idempotent, kiểm tra mọi mã HTTP).
+Các connector được đăng ký bởi job one-shot `connect-setup` qua Kafka Connect REST API (cùng
+pattern với các job `*-setup` khác: idempotent, kiểm tra mọi mã HTTP): mỗi file
+`connect/connectors/<name>.json` được `PUT` vào `/connectors/<name>/config` (tạo mới hoặc cập nhật),
+rồi job chờ tới khi connector và task của nó `RUNNING`.
 
 ### 4.3. Ánh xạ kiểu dữ liệu
 

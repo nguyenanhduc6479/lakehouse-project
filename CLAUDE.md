@@ -36,8 +36,9 @@ no HA, replicas, poolers or TLS.
   Trino, Airflow, Grafana/Loki/Alloy. Roadmap phases 1 and 2 are **done**
   (2026-11-02): `source/schema.sql` (schema `shop`, 3 tables, triggers, publication
   `dbz_publication`, role `debezium`) is applied by the one-shot `source-db-setup` job (idempotent,
-  CDC-ready), and `source/generator.py` fills it continuously. **Next: phase 3 (CDC — Kafka
-  Connect + Debezium).**
+  CDC-ready), and `source/generator.py` fills it continuously. Phase 3 is **done** (2026-11-03):
+  Debezium on Kafka Connect streams `shop.*` into Avro topics `src.shop.*`. **Next: phase 4
+  (bronze — Iceberg sink on the same Connect worker).**
 - **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
   3.3): compose profile `generator`, so a plain `up` never starts it. Rate `GENERATOR_RATE` (`.env`).
   Pitfalls already fixed — keep them: the psycopg connection must be `autocommit=True` (otherwise
@@ -48,7 +49,8 @@ no HA, replicas, poolers or TLS.
   `tests/test_generator.py` — keep both pins in sync with `source/requirements.txt`.
 - **Runtime-validated 2026-11-02 on native Docker Engine 29.9.2 in WSL** (from empty volumes,
   `build` + `up -d`): all services come up (16 running, all healthy except Loki which has no
-  healthcheck; the one-shot jobs `Exited (0)` — 22 services incl. `source-db-setup`); every host port answers. A REST-submitted Spark job
+  healthcheck; the one-shot jobs `Exited (0)` — 22 services incl. `source-db-setup`; phase 3 added
+  `kafka-connect` + `connect-setup` + `kafka-ui`, now 25); every host port answers. A REST-submitted Spark job
   runs on a real executor and its driver/executor logs reach Loki. Verified: Trino and Spark (`helper.get_spark`) both create/read/drop
   an Iceberg table through Polaris into the `data-platform` bucket on RustFS (re-verified after the
   MinIO → RustFS swap; `rustfs-setup` is idempotent; Airflow `s3_conn` sees the bucket); Airflow connects to its DB as the
@@ -71,7 +73,7 @@ no HA, replicas, poolers or TLS.
 ## Architecture (what exists now)
 
 The entry point `docker-compose.yml` only `include`s the modules under `compose/` (`infra.yml`, `source.yml`,
-`storage.yml`, `catalog.yml`, `spark.yml`, `trino.yml`, `airflow.yml`, `monitoring.yml`) and
+`connect.yml`, `storage.yml`, `catalog.yml`, `spark.yml`, `trino.yml`, `airflow.yml`, `monitoring.yml`) and
 declares the shared network. Every service joins the bridge network **`lakehouse`** and reaches
 the others by service name. All credentials and tunables live in `.env` and are injected via
 `environment:` — don't hardcode them in compose files.
@@ -89,6 +91,21 @@ the others by service name. All credentials and tunables live in `.env` and are 
   e.g. the Iceberg sink's exactly-once commits). **Schema Registry** (cp 7.6.0,
   `http://schema-registry:8081`, internal only). **Elasticsearch 7.17** single node, security off
   (internal only) — the search layer.
+- **CDC** (`compose/connect.yml`): **Kafka Connect** `custom-connect:7.6.0` from `connect/Dockerfile`
+  (`cp-kafka-connect:7.6.0` + **Debezium Postgres 2.7.4.Final**, Maven Central tarball, SHA-1
+  checked — the image runs **Java 11**, so Debezium 3.x (Java 17) is out). Distributed mode, one
+  worker, REST `kafka-connect:8083` (internal), internal topics `_connect-configs/-offsets/-status`
+  at RF 1, Avro default converters, `config.providers=env`: connector JSON reads secrets as
+  `${env:VAR}` from the container environment (never stored in the config topic). One-shot
+  `connect-setup` (same image, `connect/scripts/init.sh`, image healthcheck disabled) `PUT`s every
+  `connect/connectors/<name>.json` to `/connectors/<name>/config` (idempotent) and fails unless the
+  connector + task reach `RUNNING`. Connector `source-shop` (design §4.2): pgoutput, existing
+  publication `dbz_publication` (autocreate disabled), slot `dbz_slot`, topics `src.shop.<table>`,
+  `decimal.handling.mode=precise`, no tombstones. After editing a connector JSON:
+  `docker compose up -d --force-recreate connect-setup`. **Kafka UI** (`kafbat/kafka-ui:v1.5.0`,
+  host **8082**, same module): read-only browser over topics, Schema Registry and Connect; the
+  `SchemaRegistry` serde is preselected for `src.*` topics (the UI defaults to `String` = raw
+  bytes). Check recipes: `docs/services.md` → "Checking CDC".
 - **Storage** (`compose/storage.yml`): **RustFS 1.0.4** (`rustfs/rustfs`, Apache 2.0, S3 API on
   9000, console on 9001 at `/rustfs/console/`). It replaced MinIO on 2026-11-02 because MinIO stopped
   publishing images. Config via `S3_*` in `.env` (`S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`,
@@ -154,9 +171,8 @@ the others by service name. All credentials and tunables live in `.env` and are 
   Loki is distroless, so `alloy`'s healthcheck probes both via bash `/dev/tcp` (`CMD bash -c`, not
   `CMD-SHELL`).
 
-To be added by the roadmap: Kafka Connect (Debezium + Iceberg sink,
-`confluentinc/cp-kafka-connect` which already has the AvroConverter), ClickHouse, Superset,
-FastAPI.
+To be added by the roadmap: the Iceberg sink (zip built into `custom-connect`), ClickHouse,
+Superset, FastAPI.
 
 ## Common commands
 
@@ -170,7 +186,7 @@ reachable from Windows on `localhost` (WSL2 forwarding), e.g. DataGrip on 5432/5
 
 ```bash
 docker compose config            # validate/merge the included compose files — first sanity check
-docker compose build             # build custom images (custom-spark, custom-airflow)
+docker compose build             # build custom images (custom-spark, custom-airflow, custom-connect)
 docker compose up -d --remove-orphans
 docker compose up -d <service>   # one service and its dependencies
 docker compose logs -f <service>
@@ -221,8 +237,9 @@ Catalog check: `docker exec trino trino --execute "SHOW SCHEMAS FROM lakehouse"`
 ### Key ports (host)
 
 RustFS S3 9000 / console 9001 · Polaris 8181 (unauthenticated `GET :8181/api/catalog/v1/config` → 401
-means it's up) · Spark master UI 8090, RPC 7077, REST 6066 · Spark worker 8081 · Trino 8080 · Airflow 8085 · Grafana 3000 · Postgres 5432 · source-db 5433. **Not published**:
-Loki 3100, Alloy 12345, Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200, Schema Registry 8081
+means it's up) · Spark master UI 8090, RPC 7077, REST 6066 · Spark worker 8081 · Trino 8080 · Kafka UI 8082 · Airflow 8085 · Grafana 3000 · Postgres 5432 · source-db 5433. **Not published**:
+Loki 3100, Alloy 12345, Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200, Schema Registry 8081,
+Kafka Connect 8083
 — Kafka's `PLAINTEXT_HOST://localhost:9092` listener is unreachable from the host until a `ports:`
 entry is added.
 

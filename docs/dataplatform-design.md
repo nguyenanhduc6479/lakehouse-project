@@ -59,6 +59,7 @@ OLAP engine (MergeTree, background merges, `FINAL`, incremental loads from an ex
 | `source-db` (Postgres 16) | Simulated OLTP: `users`, `orders`, `order_details` | Own instance (`compose/source.yml`), database `source-db`, host port 5433, `wal_level=logical` |
 | `generator.py` | Continuous insert/update/delete into the source | Python + Faker + psycopg, adjustable rate |
 | Kafka Connect | Runs Debezium (source) and the Iceberg sink | Custom image on `confluentinc/cp-kafka-connect` (AvroConverter built in) + Debezium Postgres plugin + Iceberg sink zip (not published as an artifact — built from the Iceberg source in a multi-stage Dockerfile) |
+| Kafka UI | Look inside Kafka: topics, Avro-decoded messages, schemas, connectors (read-only) | `kafbat/kafka-ui`, host port 8082 |
 | Kafka (+ Zookeeper) | Carries Avro events | Already in `compose/infra.yml` |
 | Schema Registry | Stores Avro schemas, checks compatibility | Already in `compose/infra.yml` |
 | RustFS (S3) + Iceberg | Bronze: append-only change events | Already in the stack (`rustfs/rustfs:1.0.4`, replaced MinIO) |
@@ -167,11 +168,12 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
 ```json
 {
   "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
   "database.hostname": "source-db",
   "database.port": "5432",
-  "database.dbname": "source-db",
+  "database.dbname": "${env:SOURCE_POSTGRES_DB}",
   "database.user": "debezium",
-  "database.password": "${env:SOURCE_DB_DEBEZIUM_PASSWORD}",
+  "database.password": "${env:SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD}",
   "plugin.name": "pgoutput",
   "publication.name": "dbz_publication",
   "publication.autocreate.mode": "disabled",
@@ -197,9 +199,17 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
 - `timestamptz` always maps to `ZonedTimestamp` strings; `time.precision.mode` only affects
   `timestamp`/`time` without zone, which the schema doesn't use, so it keeps its default.
 - On first start Debezium snapshots the existing rows (events with `op = r`), then streams the WAL.
+- Debezium **2.7.4.Final**: the base image `cp-kafka-connect:7.6.0` runs Java 11, and Debezium
+  3.x needs Java 17. The plugin tarball comes from Maven Central, checksum-verified, in
+  `connect/Dockerfile`.
+- The generator writes an order as INSERT + UPDATE (`total_amount` is set after the lines) in one
+  transaction, so a new order yields a `c` and a `u` with the same `txId` — the reason silver keeps
+  only the last event per key per transaction (§6.2).
 
-Connectors are registered by a one-shot setup job through the Kafka Connect REST API (same
-pattern as the other `*-setup` jobs: idempotent, check every HTTP code).
+Connectors are registered by the one-shot `connect-setup` job through the Kafka Connect REST API
+(same pattern as the other `*-setup` jobs: idempotent, check every HTTP code): every
+`connect/connectors/<name>.json` is `PUT` to `/connectors/<name>/config` (creates or updates), then
+the job waits until the connector and its task are `RUNNING`.
 
 ### 4.3. Type mapping
 

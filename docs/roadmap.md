@@ -8,7 +8,7 @@ Each phase ends with something you can see working; don't start a phase before t
 |---|---|---|
 | 1 | Clean slate | Done |
 | 2 | Source | Done |
-| 3 | CDC | Not started |
+| 3 | CDC | Done |
 | 4 | Bronze | Not started |
 | 5 | Silver | Not started |
 | 6 | Gold | Not started |
@@ -101,17 +101,34 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `timestamptz` stores an instant; the time zone is only how a client displays it (DataGrip showed
   +00 while the server was `Asia/Ho_Chi_Minh` — fix the client, not the data).
 
-## Phase 3 — CDC
+## Phase 3 — CDC *(done)*
 
 **Goal:** every change in `source-db` arrives in Kafka as an Avro event.
 
-- [ ] Kafka Connect image on `confluentinc/cp-kafka-connect:7.6.0` + the Debezium Postgres plugin
-  (pin a version that supports Kafka 3.6).
-- [ ] New module `compose/connect.yml`: service `kafka-connect` (REST 8083 internal), internal
-  topics with replication factor 1, `config.providers=env` (`EnvVarConfigProvider`) so connector
-  configs read secrets from `.env`.
-- [ ] One-shot `connect-setup` job: registers the Debezium connector (design §4.2) through the
-  Connect REST API — idempotent, checks every HTTP code.
+- [x] Kafka Connect image `custom-connect:7.6.0` (`connect/Dockerfile`) on
+  `confluentinc/cp-kafka-connect:7.6.0` + the Debezium Postgres plugin **2.7.4.Final** (Maven
+  Central tarball, SHA-1 checked). The base image runs Java 11, which rules out Debezium 3.x
+  (Java 17); 2.7 runs on Kafka Connect 3.x.
+- [x] New module `compose/connect.yml`: service `kafka-connect` (distributed mode, one worker, REST
+  8083 internal), internal topics `_connect-configs` / `_connect-offsets` / `_connect-status` with
+  replication factor 1, Avro as the worker default converters, `config.providers=env`
+  (`EnvVarConfigProvider`) so connector configs read `${env:SOURCE_POSTGRES_DB}` and
+  `${env:SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD}` from the container's environment.
+- [x] One-shot `connect-setup` job (`connect/scripts/init.sh`): `PUT`s every
+  `connect/connectors/<name>.json` (now `source-shop.json`, design §4.2) to
+  `/connectors/<name>/config` — creates or updates, so re-running is safe — checks every HTTP code
+  and fails unless the connector and its task reach `RUNNING`.
+- [x] Kafka UI (`kafbat/kafka-ui:v1.5.0`, http://localhost:8082, read-only) to see topics,
+  Avro-decoded events, schemas and connector state in the browser; `connect/scripts/watch_events.py`
+  prints the live event stream one line per change in the terminal.
+- [x] Verified 2026-11-03: connector + task `RUNNING`; 6 subjects in Schema Registry
+  (compatibility `BACKWARD`); the snapshot (`op = r`) matched the source exactly (48 / 174 / 521
+  rows); live `c` / `u` / `d` events with the generator on; replaying every event per key
+  reproduced all three source tables exactly (keys and `updated_at`); `total_amount` is an Avro
+  `decimal(18,2)`; timestamps are ISO-8601 UTC strings; a cascaded delete gave 4 `order_details`
+  deletes + 1 `orders` delete with the same `txId`; stopping Connect left `dbz_slot` inactive with
+  growing lag, and the restart resumed from the stored LSN (snapshot skipped, nothing lost);
+  re-running `connect-setup` reports "updated"; Connect logs reach Grafana.
 
 **Done when:**
 - Connector status is `RUNNING` (`GET /connectors/source-shop/status`).
@@ -119,6 +136,31 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `kafka-avro-console-consumer` on `src.shop.orders` shows snapshot events (`op = r`) followed by
   live `c` / `u` / `d` events.
 - `pg_replication_slots` on `source-db` shows `dbz_slot` as active.
+
+**Lessons learned:**
+- Check the base image's runtime before choosing a plugin version: `java -version` in the image
+  decided Debezium 2.7 over 3.x.
+- Keep secrets as `${env:...}` in the connector JSON: Connect resolves them at runtime, so the
+  password is never stored in the `_connect-configs` topic or returned by the REST API.
+- `PUT /connectors/<name>/config` is the idempotent way to register a connector (`POST` fails on
+  the second run).
+- A one-shot job that reuses a service image inherits its `HEALTHCHECK` — disable it.
+- Kafka message counts are events, not rows. The convincing CDC check is to replay the events into
+  per-key state and compare it with the source.
+- Events reflect how the application writes: the generator inserts an order then updates its total
+  in the same transaction, so a new order is `c` + `u` with one `txId`; a cascaded delete spans two
+  topics with one `txId`. Silver must collapse events per key per transaction.
+- The offset (last LSN) lives in Kafka (`_connect-offsets`), the slot keeps the WAL: a restart
+  resumes exactly ("previous offset ... completed snapshot" → snapshot skipped). While Connect is
+  down the slot is inactive and WAL piles up; even while active, `confirmed_flush_lsn` trails by up
+  to one offset flush (~60 s), so slot lag is small but not zero.
+- `timeout`/Ctrl+C on `docker exec` kills only the host-side client: the process inside the
+  container keeps running (two forgotten console consumers showed up as live groups in Kafka UI).
+  For long-running clients use `docker run --rm`, which forwards signals.
+- Kafka UI defaults to the `String` serde (Avro shows as raw bytes) unless a `SchemaRegistry` serde
+  is bound to the topic pattern.
+- `kafka-avro-console-consumer` prints its logs to stdout (filter lines starting with `{`) and
+  shows Avro decimals as raw bytes — decode them with the schema's `scale`.
 
 ## Phase 4 — Bronze
 

@@ -7,7 +7,7 @@ Inside the Docker network every service is reached by its service name (e.g. `ka
 `http://polaris:8181`), not `localhost`. From Windows (DataGrip, browser) the host ports below are
 reachable on `localhost` too: Docker Engine runs inside WSL and WSL2 forwards published ports.
 
-The stack has 22 services: 16 long-running ones and 6 one-shot jobs (see the end of this page).
+The stack has 25 services: 18 long-running ones and 7 one-shot jobs (see the end of this page).
 
 ## Services with a UI
 
@@ -15,6 +15,7 @@ The stack has 22 services: 16 long-running ones and 6 one-shot jobs (see the end
 |---|---|---|---|
 | Airflow webserver | 8085 → 8080 | http://localhost:8085 | `AIRFLOW_ADMIN_USER` / `AIRFLOW_ADMIN_PASSWORD` |
 | Grafana | 3000 | http://localhost:3000 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` |
+| Kafka UI | 8082 → 8080 | http://localhost:8082 | none (read-only: browse topics, Avro-decoded messages, Schema Registry, Kafka Connect) |
 | RustFS console | 9001 | http://localhost:9001/rustfs/console/ | `S3_ACCESS_KEY` / `S3_SECRET_KEY` |
 | Spark master UI | 8090 → 8080 | http://localhost:8090 | — |
 | Spark worker UI | 8081 | http://localhost:8081 | — (links to each driver/executor's stdout/stderr; the same logs are in Grafana under `service=spark-job`) |
@@ -43,7 +44,8 @@ Backend services with no web UI and no published port; reachable only from insid
 |---|---|---|
 | Kafka | `kafka:29092` | Event broker. The `PLAINTEXT_HOST://localhost:9092` listener exists but has no `ports:` entry, so it is unreachable from the host |
 | Zookeeper | `zookeeper:2181` | Kafka coordination |
-| Schema Registry | `http://schema-registry:8081` | Avro schemas |
+| Schema Registry | `http://schema-registry:8081` | Avro schemas (subjects `src.shop.<table>-key/-value`, compatibility `BACKWARD`) |
+| Kafka Connect | `http://kafka-connect:8083` | Runs the Debezium connector `source-shop` (source-db → topics `src.shop.*`); REST API for connector status. No host port: use `docker exec kafka-connect curl -s ...` |
 | Elasticsearch 7.17 | `http://elasticsearch:9200` | Search index, security off |
 | Loki | `http://loki:3100` | Log store, read through Grafana |
 | Alloy | `alloy:12345` | Log collector (tails Docker json-file logs + Spark job logs); every other service waits for it to be healthy; its debug UI exists but the port is not published |
@@ -79,12 +81,13 @@ docker run --rm --network lakehouse-project_lakehouse alpine:3.19 sh -c \
 
 Run once at startup and exit; they have no port and no UI: `postgres-setup`, `source-db-setup`
 (applies `source/schema.sql`), `rustfs-setup`,
-`polaris-bootstrap`, `polaris-setup`, `airflow-init`.
+`polaris-bootstrap`, `polaris-setup`, `airflow-init`, `connect-setup` (registers
+`connect/connectors/*.json` with Kafka Connect and waits until they are `RUNNING`).
 `airflow-scheduler` is a long-running backend process, also without a UI or port.
 
 ## On demand (compose profile `generator`)
 
-Not started by `docker compose up`; not counted in the 22 services above.
+Not started by `docker compose up`; not counted in the 25 services above.
 
 | Service | Role | Start / stop |
 |---|---|---|
@@ -128,7 +131,76 @@ after the service name, e.g. `docker compose --profile generator run --rm genera
 | `--seed` | Random seed, for a reproducible sequence of actions | random |
 | `--log-level` | `DEBUG`, `INFO`, `WARNING` | `INFO` |
 
+## Checking CDC
+
+**In the browser — Kafka UI** (http://localhost:8082, cluster `lakehouse`):
+
+- *Topics* → `src.shop.orders` → *Messages*: every change event, decoded from Avro (the
+  `SchemaRegistry` serde is preselected for `src.*` topics). Expand one to see `before` / `after` /
+  `source.lsn` / `source.txId` / `op`; set *Seek type* to *Newest* and hit refresh after a change.
+- *Schema Registry*: the subjects Debezium registered, their versions and compatibility.
+- *Kafka Connect* → `source-shop`: connector and task state, its config (the password stays
+  `${env:...}`).
+- *Consumers*: consumer groups and their lag (the Iceberg sink appears here in phase 4).
+
+It is read-only (`KAFKA_CLUSTERS_0_READONLY`): no producing, deleting topics or editing
+connectors from the UI — those stay in code.
+
+**From the terminal** — Kafka and Kafka Connect have no host port, so run the clients inside the
+containers:
+
+```bash
+# connector + task state (both should be RUNNING)
+docker exec kafka-connect curl -s http://localhost:8083/connectors/source-shop/status
+
+# Avro subjects registered by Debezium
+docker exec kafka-connect curl -s http://schema-registry:8081/subjects
+
+# read change events as JSON, exits after 10 s without new messages (--timeout-ms, so `exec` is
+# fine here); the tool also prints its own logs to stdout: keep lines starting with {
+docker exec schema-registry kafka-avro-console-consumer --bootstrap-server kafka:29092 \
+  --topic src.shop.orders --from-beginning --property schema.registry.url=http://localhost:8081 \
+  --timeout-ms 10000 2>/dev/null | grep '^{'
+
+# replication slot: active, and how much WAL it still holds
+docker exec source-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT slot_name, active,
+  pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS lag FROM pg_replication_slots"'
+```
+
+**Watch CDC live** — one readable line per event (operation, table, key, transaction id, changed
+columns), from the repo root:
+
+```bash
+docker run --rm --network lakehouse-project_lakehouse confluentinc/cp-schema-registry:7.6.0 \
+  kafka-avro-console-consumer --bootstrap-server kafka:29092 --include 'src\.shop\..*' \
+  --property schema.registry.url=http://schema-registry:8081 \
+  2>/dev/null | python3 -u connect/scripts/watch_events.py      # Ctrl+C stops it
+```
+
+Use a throwaway `docker run --rm` container, not `docker exec`: Ctrl+C (or `timeout`) on a
+`docker exec` only kills the client on the host — the consumer keeps running inside the container
+and stays listed as a live group under *Consumers* in Kafka UI. `docker run` forwards the signal,
+so the container stops and is removed.
+
+Leave it running, then change a row in DataGrip (`UPDATE shop.users SET city = 'Huế' WHERE
+user_id = 1;`) or start the generator: each change shows up within about a second, e.g.
+
+```
+UPDATE   users          user_id=1      tx=1389  city: Huế -> Đà Lạt, updated_at: ... -> ...
+INSERT   orders         order_id=216    tx=1401
+INSERT   order_details  order_detail_id=640    tx=1401
+UPDATE   orders         order_id=216    tx=1401  total_amount: 0.00 -> 2,742,000.00
+```
+
+Without `--from-beginning` it shows only new events; add it to replay the snapshot too.
+
+Avro decimals (`total_amount`, prices) show up as raw bytes in the raw console consumer; the value is
+the big-endian integer divided by 10^scale (scale 2).
+
+Re-register connectors after editing `connect/connectors/*.json`:
+`docker compose up -d --force-recreate connect-setup`.
+
 ## Not built yet
 
-Planned by the [roadmap](roadmap.md), ports not assigned yet: Kafka Connect (Debezium + Iceberg
-sink), ClickHouse, Superset, FastAPI + web page. Add them here when they land.
+Planned by the [roadmap](roadmap.md), ports not assigned yet: the Iceberg sink (on the existing
+Kafka Connect), ClickHouse, Superset, FastAPI + web page. Add them here when they land.

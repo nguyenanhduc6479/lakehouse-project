@@ -1,6 +1,7 @@
 include:
   - compose/infra.yml
   - compose/source.yml
+  - compose/connect.yml
   - compose/storage.yml
   - compose/catalog.yml
   - compose/spark.yml

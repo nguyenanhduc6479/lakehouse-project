@@ -9,7 +9,7 @@ Mỗi phase kết thúc bằng một thứ nhìn thấy được là đang chạ
 |---|---|---|
 | 1 | Dọn sạch | Xong |
 | 2 | Nguồn | Xong |
-| 3 | CDC | Chưa bắt đầu |
+| 3 | CDC | Xong |
 | 4 | Bronze | Chưa bắt đầu |
 | 5 | Silver | Chưa bắt đầu |
 | 6 | Gold | Chưa bắt đầu |
@@ -103,17 +103,35 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `timestamptz` lưu một thời điểm tuyệt đối; múi giờ chỉ là cách client hiển thị (DataGrip hiện +00
   trong khi server là `Asia/Ho_Chi_Minh` — sửa ở client, không sửa dữ liệu).
 
-## Phase 3 — CDC
+## Phase 3 — CDC *(xong)*
 
 **Mục tiêu:** mọi thay đổi trong `source-db` đến được Kafka dưới dạng event Avro.
 
-- [ ] Image Kafka Connect dựa trên `confluentinc/cp-kafka-connect:7.6.0` + plugin Debezium Postgres
-  (chọn phiên bản hỗ trợ Kafka 3.6).
-- [ ] Module mới `compose/connect.yml`: service `kafka-connect` (REST 8083, chỉ trong mạng nội bộ),
-  các topic nội bộ với replication factor 1, `config.providers=env` (`EnvVarConfigProvider`) để
-  cấu hình connector đọc secret từ `.env`.
-- [ ] Job one-shot `connect-setup`: đăng ký Debezium connector (design §4.2) qua Connect REST API —
-  idempotent, kiểm tra mọi HTTP code.
+- [x] Image Kafka Connect `custom-connect:7.6.0` (`connect/Dockerfile`) dựa trên
+  `confluentinc/cp-kafka-connect:7.6.0` + plugin Debezium Postgres **2.7.4.Final** (tarball từ Maven
+  Central, có kiểm tra SHA-1). Image gốc chạy Java 11 nên loại Debezium 3.x (cần Java 17); 2.7 chạy
+  được với Kafka Connect 3.x.
+- [x] Module mới `compose/connect.yml`: service `kafka-connect` (chế độ distributed, một worker, REST
+  8083 chỉ trong mạng nội bộ), các topic nội bộ `_connect-configs` / `_connect-offsets` /
+  `_connect-status` với replication factor 1, converter mặc định của worker là Avro,
+  `config.providers=env` (`EnvVarConfigProvider`) để cấu hình connector đọc
+  `${env:SOURCE_POSTGRES_DB}` và `${env:SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD}` từ biến môi trường
+  của container.
+- [x] Job one-shot `connect-setup` (`connect/scripts/init.sh`): `PUT` mỗi file
+  `connect/connectors/<name>.json` (hiện là `source-shop.json`, design §4.2) vào
+  `/connectors/<name>/config` — tạo mới hoặc cập nhật, nên chạy lại vẫn an toàn — kiểm tra mọi mã
+  HTTP và báo lỗi nếu connector và task không lên `RUNNING`.
+- [x] Kafka UI (`kafbat/kafka-ui:v1.5.0`, http://localhost:8082, chỉ đọc) để xem topic, event đã
+  giải mã Avro, schema và trạng thái connector trên trình duyệt; `connect/scripts/watch_events.py`
+  in luồng event trực tiếp trong terminal, mỗi thay đổi một dòng.
+- [x] Đã kiểm tra 2026-11-03: connector + task `RUNNING`; Schema Registry có 6 subject
+  (compatibility `BACKWARD`); snapshot (`op = r`) khớp chính xác với nguồn (48 / 174 / 521 dòng); có
+  event `c` / `u` / `d` liên tục khi bật generator; dựng lại trạng thái từng khóa từ toàn bộ event
+  ra đúng y hệt ba bảng nguồn (khóa và `updated_at`); `total_amount` là Avro `decimal(18,2)`;
+  timestamp là chuỗi ISO-8601 theo UTC; xóa cascade ra 4 delete `order_details` + 1 delete `orders`
+  cùng một `txId`; dừng Connect thì `dbz_slot` inactive và lag tăng dần, khởi động lại thì đọc tiếp
+  từ LSN đã lưu (bỏ qua snapshot, không mất event); chạy lại `connect-setup` báo "updated"; log của
+  Connect lên Grafana.
 
 **Hoàn thành khi:**
 - Connector ở trạng thái `RUNNING` (`GET /connectors/source-shop/status`).
@@ -122,6 +140,32 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `kafka-avro-console-consumer` trên `src.shop.orders` hiện các event snapshot (`op = r`), tiếp
   theo là các event `c` / `u` / `d` đang diễn ra.
 - `pg_replication_slots` trên `source-db` cho thấy `dbz_slot` đang active.
+
+**Rút ra được:**
+- Kiểm tra runtime của image gốc trước khi chọn phiên bản plugin: `java -version` trong image quyết
+  định chọn Debezium 2.7 thay vì 3.x.
+- Giữ secret dạng `${env:...}` trong JSON của connector: Connect chỉ thay giá trị lúc chạy, nên mật
+  khẩu không bao giờ nằm trong topic `_connect-configs` hay bị REST API trả về.
+- `PUT /connectors/<name>/config` là cách đăng ký connector idempotent (`POST` lỗi ở lần chạy thứ
+  hai).
+- Job one-shot dùng lại image của một service sẽ thừa hưởng `HEALTHCHECK` của image đó — phải tắt
+  đi.
+- Số message trong Kafka là số event, không phải số dòng. Cách kiểm tra CDC thuyết phục là dựng lại
+  trạng thái theo từng khóa từ event rồi so với nguồn.
+- Event phản ánh đúng cách ứng dụng ghi dữ liệu: generator insert đơn rồi update tổng tiền trong
+  cùng transaction, nên đơn mới ra `c` + `u` cùng một `txId`; xóa cascade trải trên hai topic với
+  cùng một `txId`. Silver phải gộp event theo từng khóa trong mỗi transaction.
+- Offset (LSN cuối) nằm trong Kafka (`_connect-offsets`), còn slot giữ WAL: khởi động lại thì đọc
+  tiếp chính xác ("previous offset ... completed snapshot" → bỏ qua snapshot). Khi Connect dừng,
+  slot inactive và WAL dồn lại; kể cả khi active, `confirmed_flush_lsn` vẫn chậm tối đa một lần
+  flush offset (~60 giây), nên slot lag nhỏ nhưng không bằng 0.
+- `timeout`/Ctrl+C trên `docker exec` chỉ giết client phía host: process bên trong container vẫn
+  chạy (hai console consumer bị bỏ quên hiện thành group đang sống trong Kafka UI). Với client chạy
+  lâu, dùng `docker run --rm`, vì nó chuyển tín hiệu vào container.
+- Kafka UI mặc định dùng serde `String` (Avro hiện thành byte thô), trừ khi gắn serde
+  `SchemaRegistry` cho pattern của topic.
+- `kafka-avro-console-consumer` in log ra stdout (lọc các dòng bắt đầu bằng `{`) và hiển thị decimal
+  Avro dưới dạng byte thô — giải mã bằng `scale` trong schema.
 
 ## Phase 4 — Bronze
 
