@@ -101,7 +101,10 @@ the others by service name. All credentials and tunables live in `.env` and are 
   `connect/connectors/<name>.json` to `/connectors/<name>/config` (idempotent) and fails unless the
   connector + task reach `RUNNING`. Connector `source-shop` (design §4.2): pgoutput, existing
   publication `dbz_publication` (autocreate disabled), slot `dbz_slot`, topics `src.shop.<table>`,
-  `decimal.handling.mode=precise`, no tombstones. After editing a connector JSON:
+  `decimal.handling.mode=precise`, no tombstones, heartbeat every 10 s with
+  `heartbeat.action.query` upserting `public.debezium_heartbeat` (in the publication, not in
+  `table.include.list`) — without the action query the slot never advances while `shop.*` is idle,
+  because pgoutput sends nothing for unpublished tables. After editing a connector JSON:
   `docker compose up -d --force-recreate connect-setup`. **Kafka UI** (`kafbat/kafka-ui:v1.5.0`,
   host **8082**, same module): read-only browser over topics, Schema Registry and Connect; the
   `SchemaRegistry` serde is preselected for `src.*` topics (the UI defaults to `String` = raw

@@ -126,3 +126,20 @@ GRANT USAGE  ON SCHEMA shop TO debezium;
 GRANT SELECT ON ALL TABLES IN SCHEMA shop TO debezium;
 -- tables created later in shop (e.g. schema-evolution tests) are readable by Debezium too
 ALTER DEFAULT PRIVILEGES IN SCHEMA shop GRANT SELECT ON TABLES TO debezium;
+
+-- Heartbeat table: Debezium upserts its single row every heartbeat (heartbeat.action.query in
+-- connect/connectors/source-shop.json). pgoutput skips transactions that touch no published
+-- table, so while shop.* is idle Debezium would never see a newer LSN and the slot would keep all
+-- WAL written meanwhile (checkpoints, other tables). The table is in the publication but not in
+-- the connector's table.include.list: it advances the slot, but produces no Kafka topic.
+CREATE TABLE IF NOT EXISTS public.debezium_heartbeat (
+    id  smallint    PRIMARY KEY,
+    ts  timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT, UPDATE ON public.debezium_heartbeat TO debezium;
+
+SELECT 'ALTER PUBLICATION dbz_publication ADD TABLE public.debezium_heartbeat'
+WHERE NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                  WHERE pubname = 'dbz_publication'
+                    AND schemaname = 'public' AND tablename = 'debezium_heartbeat')
+\gexec

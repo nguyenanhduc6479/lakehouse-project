@@ -119,6 +119,8 @@ Lựa chọn thiết kế:
   được tự tạo: mặc định của nó là `FOR ALL TABLES`, đòi quyền superuser).
 - Một user riêng `debezium` có `LOGIN` + `REPLICATION` và `SELECT` trên `shop` (cả các bảng tạo sau
   này, nhờ `ALTER DEFAULT PRIVILEGES`); mật khẩu là `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`.
+- Bảng heartbeat `public.debezium_heartbeat` (một dòng, cấp `INSERT`/`UPDATE` cho `debezium`), cũng
+  nằm trong publication — xem `heartbeat.action.query` ở §4.2.
 
 Toàn bộ phần này — schema, bảng, trigger, thiết lập CDC — nằm trong **`source/schema.sql`**, được
 job một lần **`source-db-setup`** (`compose/source.yml`, image `postgres:16`,
@@ -187,6 +189,8 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
   "table.include.list": "shop.users,shop.orders,shop.order_details",
   "tombstones.on.delete": "false",
   "decimal.handling.mode": "precise",
+  "heartbeat.interval.ms": "10000",
+  "heartbeat.action.query": "INSERT INTO public.debezium_heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
   "key.converter": "io.confluent.connect.avro.AvroConverter",
   "key.converter.schema.registry.url": "http://schema-registry:8081",
   "value.converter": "io.confluent.connect.avro.AvroConverter",
@@ -201,6 +205,13 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
 - `tombstones.on.delete=false`: nếu không, sau mỗi delete Debezium sẽ gửi thêm một message có value
   `null`, chỉ dùng cho Kafka log compaction — thứ dự án này không dùng.
 - `decimal.handling.mode=precise`: không bao giờ dùng `double` cho tiền.
+- `heartbeat.interval.ms` + `heartbeat.action.query`: pgoutput bỏ qua các transaction không đụng tới
+  bảng nào trong publication, nên khi `shop.*` không có thay đổi, Debezium không thấy LSN mới, không
+  xác nhận được, và slot giữ lại toàn bộ WAL sinh ra trong lúc đó (đo được: lag kẹt ở ~2,7 MB). Chỉ
+  bật heartbeat thì Debezium chỉ gửi lại offset cũ; action query upsert dòng của
+  `public.debezium_heartbeat` mỗi 10 giây, tạo ra một thay đổi đi qua slot nên LSN tiến lên (lag về
+  dưới 1 KB). Bảng nằm trong publication nhưng không có trong `table.include.list`, nên không có
+  topic Kafka; bản thân heartbeat đi vào topic `__debezium-heartbeat.src`.
 - `timestamptz` luôn được map thành chuỗi `ZonedTimestamp`; `time.precision.mode` chỉ ảnh hưởng
   `timestamp`/`time` không có múi giờ, thứ schema không dùng, nên giữ mặc định.
 - Lần khởi động đầu, Debezium snapshot các dòng đang có (event với `op = r`), sau đó stream WAL.

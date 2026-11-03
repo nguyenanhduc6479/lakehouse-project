@@ -115,6 +115,8 @@ Design choices:
   (Debezium must not create it: its default would be `FOR ALL TABLES`, which needs superuser).
 - A dedicated `debezium` user with `LOGIN` + `REPLICATION` and `SELECT` on `shop` (also on future
   tables, via `ALTER DEFAULT PRIVILEGES`); password `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`.
+- Heartbeat table `public.debezium_heartbeat` (one row, `INSERT`/`UPDATE` granted to `debezium`),
+  also in the publication — see `heartbeat.action.query` in §4.2.
 
 All of it — schema, tables, triggers, CDC setup — lives in **`source/schema.sql`**, applied on
 every `up` by the one-shot **`source-db-setup`** job (`compose/source.yml`, image `postgres:16`,
@@ -182,6 +184,8 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
   "table.include.list": "shop.users,shop.orders,shop.order_details",
   "tombstones.on.delete": "false",
   "decimal.handling.mode": "precise",
+  "heartbeat.interval.ms": "10000",
+  "heartbeat.action.query": "INSERT INTO public.debezium_heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
   "key.converter": "io.confluent.connect.avro.AvroConverter",
   "key.converter.schema.registry.url": "http://schema-registry:8081",
   "value.converter": "io.confluent.connect.avro.AvroConverter",
@@ -196,6 +200,13 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
 - `tombstones.on.delete=false`: after a delete Debezium would otherwise send an extra message
   with a `null` value, used only for Kafka log compaction, which this project does not use.
 - `decimal.handling.mode=precise`: never `double` for money.
+- `heartbeat.interval.ms` + `heartbeat.action.query`: pgoutput skips transactions that touch no
+  published table, so while `shop.*` is idle Debezium never sees a newer LSN, cannot confirm it,
+  and the slot keeps all WAL written meanwhile (measured: lag stuck at ~2.7 MB). A heartbeat alone
+  only re-sends the old offset; the action query upserts the row of `public.debezium_heartbeat`
+  every 10 s, a change that flows through the slot so the LSN advances (lag back under 1 KB). The
+  table is in the publication but not in `table.include.list`, so it gets no Kafka topic; the
+  heartbeats themselves go to topic `__debezium-heartbeat.src`.
 - `timestamptz` always maps to `ZonedTimestamp` strings; `time.precision.mode` only affects
   `timestamp`/`time` without zone, which the schema doesn't use, so it keeps its default.
 - On first start Debezium snapshots the existing rows (events with `op = r`), then streams the WAL.

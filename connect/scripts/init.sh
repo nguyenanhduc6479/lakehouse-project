@@ -45,8 +45,10 @@ for file in "${files[@]}"; do
       if grep -q '"state":"FAILED"' /tmp/resp; then
         die "connector ${name} FAILED"
       fi
-      states=$(grep -o '"state":"[A-Z]*"' /tmp/resp | wc -l)
-      running=$(grep -o '"state":"RUNNING"' /tmp/resp | wc -l)
+      # `|| true`: grep exits 1 when nothing matches (e.g. UNASSIGNED, no RUNNING yet), which
+      # pipefail + set -e would turn into a silent exit of the whole script
+      states=$({ grep -o '"state":"[A-Z]*"' /tmp/resp || true; } | wc -l)
+      running=$({ grep -o '"state":"RUNNING"' /tmp/resp || true; } | wc -l)
       if [ "$states" -ge 2 ] && [ "$states" -eq "$running" ]; then
         echo "Connector ${name}: connector + $((running - 1)) task(s) RUNNING."
         continue 2

@@ -80,7 +80,8 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 **Hoàn thành khi:**
 - `docker compose --profile generator up -d generator` → số dòng trong `shop.*` tăng liên tục khi
   xem bằng DataGrip / `psql`.
-- `SELECT * FROM pg_publication_tables WHERE pubname = 'dbz_publication'` liệt kê đủ ba bảng.
+- `SELECT * FROM pg_publication_tables WHERE pubname = 'dbz_publication'` liệt kê đủ ba bảng
+  (cộng `public.debezium_heartbeat`, thêm ở phase 3).
 - `\du debezium` có thuộc tính `Replication`.
 
 **Rút ra được:**
@@ -132,6 +133,10 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   cùng một `txId`; dừng Connect thì `dbz_slot` inactive và lag tăng dần, khởi động lại thì đọc tiếp
   từ LSN đã lưu (bỏ qua snapshot, không mất event); chạy lại `connect-setup` báo "updated"; log của
   Connect lên Grafana.
+- [x] Sửa theo review (2026-11-03): `init.sh` không còn chết im lặng khi connector chưa có trạng thái
+  `RUNNING` nào (`grep` trả exit 1 dưới `pipefail`); heartbeat kèm `heartbeat.action.query` ghi vào
+  `public.debezium_heartbeat` (được `source/schema.sql` thêm vào publication) — slot lag lúc idle từ
+  kẹt ở ~2,7 MB xuống dưới 1 KB; `watch_events.py` giải mã decimal theo tên cột.
 
 **Hoàn thành khi:**
 - Connector ở trạng thái `RUNNING` (`GET /connectors/source-shop/status`).
@@ -162,6 +167,12 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `timeout`/Ctrl+C trên `docker exec` chỉ giết client phía host: process bên trong container vẫn
   chạy (hai console consumer bị bỏ quên hiện thành group đang sống trong Kafka UI). Với client chạy
   lâu, dùng `docker run --rm`, vì nó chuyển tín hiệu vào container.
+- `set -euo pipefail` + `grep | wc -l`: `grep` trả exit 1 khi không khớp gì, nên cả script thoát
+  mà không in gì. Phải test cả nhánh "chưa sẵn sàng", không chỉ nhánh thành công.
+- Chỉ bật heartbeat của Debezium thì slot không tiến: pgoutput không gửi gì cho transaction trên bảng
+  ngoài publication, nên LSN trong offset đứng yên. Cần `heartbeat.action.query` ghi vào một bảng có
+  trong publication. Đo (slot lag trước/sau) thay vì tin vào tên cấu hình.
+- Đừng đoán kiểu dữ liệu từ nội dung: byte thô của decimal có thể in được (167.06 = `"AB"`).
 - Kafka UI mặc định dùng serde `String` (Avro hiện thành byte thô), trừ khi gắn serde
   `SchemaRegistry` cho pattern của topic.
 - `kafka-avro-console-consumer` in log ra stdout (lọc các dòng bắt đầu bằng `{`) và hiển thị decimal

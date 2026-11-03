@@ -78,7 +78,8 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 **Done when:**
 - `docker compose --profile generator up -d generator` → row counts in `shop.*` keep growing in
   DataGrip / `psql`.
-- `SELECT * FROM pg_publication_tables WHERE pubname = 'dbz_publication'` lists the three tables.
+- `SELECT * FROM pg_publication_tables WHERE pubname = 'dbz_publication'` lists the three tables
+  (plus `public.debezium_heartbeat`, added in phase 3).
 - `\du debezium` shows the `Replication` attribute.
 
 **Lessons learned:**
@@ -129,6 +130,10 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
   deletes + 1 `orders` delete with the same `txId`; stopping Connect left `dbz_slot` inactive with
   growing lag, and the restart resumed from the stored LSN (snapshot skipped, nothing lost);
   re-running `connect-setup` reports "updated"; Connect logs reach Grafana.
+- [x] Review fixes (2026-11-03): `init.sh` no longer dies silently while a connector has no
+  `RUNNING` state yet (`grep` exit 1 under `pipefail`); heartbeat with `heartbeat.action.query` on
+  `public.debezium_heartbeat` (added to the publication by `source/schema.sql`) — idle slot lag
+  went from stuck at ~2.7 MB to under 1 KB; `watch_events.py` decodes decimals by column name.
 
 **Done when:**
 - Connector status is `RUNNING` (`GET /connectors/source-shop/status`).
@@ -157,6 +162,12 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - `timeout`/Ctrl+C on `docker exec` kills only the host-side client: the process inside the
   container keeps running (two forgotten console consumers showed up as live groups in Kafka UI).
   For long-running clients use `docker run --rm`, which forwards signals.
+- `set -euo pipefail` + `grep | wc -l`: `grep` exits 1 when nothing matches, so the whole script
+  exits with no message. Test the "not ready yet" path, not only the happy one.
+- A Debezium heartbeat alone does not move the slot: pgoutput sends nothing for transactions on
+  unpublished tables, so the offset LSN stays put. It takes `heartbeat.action.query` writing to a
+  published table. Measure (slot lag before/after) instead of trusting the config name.
+- Don't guess types from content: raw decimal bytes can be printable (167.06 = `"AB"`).
 - Kafka UI defaults to the `String` serde (Avro shows as raw bytes) unless a `SchemaRegistry` serde
   is bound to the topic pattern.
 - `kafka-avro-console-consumer` prints its logs to stdout (filter lines starting with `{`) and

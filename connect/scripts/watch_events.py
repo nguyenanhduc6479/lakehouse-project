@@ -12,7 +12,8 @@ columns that changed. Run from the repo root:
 `docker run --rm`, not `docker exec`: Ctrl+C on `docker exec` leaves the consumer running inside
 the container.
 
-Avro decimals (money columns) arrive as raw bytes and are decoded with scale 2.
+Avro decimals (the money columns in DECIMAL_COLUMNS) arrive as raw bytes and are decoded with
+scale 2.
 """
 
 from __future__ import annotations
@@ -22,10 +23,13 @@ import sys
 
 OPS = {"c": "INSERT", "u": "UPDATE", "d": "DELETE", "r": "SNAPSHOT"}
 DECIMAL_SCALE = 2  # numeric(18,2) in source/schema.sql
+# Decided by column name, not by content: raw decimal bytes can happen to be printable (167.06 is
+# b"AB"), so "looks like text" can't tell a decimal from a string. Update with source/schema.sql.
+DECIMAL_COLUMNS = {"total_amount", "unit_price", "discount_amount", "line_total"}
 
 
 def unwrap(value):
-    """Avro unions show up as {"type": value}; decimals as a latin-1 string of raw bytes."""
+    """Avro unions show up as {"type": value}."""
     if isinstance(value, dict) and len(value) == 1:
         value = next(iter(value.values()))
     return value
@@ -38,8 +42,9 @@ def row(image: dict | None) -> dict:
     return {k: unwrap(v) for k, v in fields.items()}
 
 
-def show(value):
-    if isinstance(value, str) and value and not value.isprintable():
+def show(column: str, value):
+    """Decimals come as a latin-1 string of the big-endian unscaled integer."""
+    if column in DECIMAL_COLUMNS and isinstance(value, str):
         raw = value.encode("latin-1")
         return f"{int.from_bytes(raw, 'big', signed=True) / 10**DECIMAL_SCALE:,.2f}"
     return value
@@ -56,7 +61,7 @@ def main() -> None:
         changed = ""
         if before and after:
             diffs = [
-                f"{k}: {show(before.get(k))} -> {show(v)}"
+                f"{k}: {show(k, before.get(k))} -> {show(k, v)}"
                 for k, v in after.items()
                 if before.get(k) != v
             ]
