@@ -121,9 +121,13 @@ the other tables are not re-read. Existing rows arrive as `op = r` events.
 ```bash
 docker exec source-db sh -c "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -c \"
   INSERT INTO public.debezium_signal (id, type, data)
-  VALUES ('snapshot-$T-' || to_char(now(), 'YYYYMMDDHH24MISS'), 'execute-snapshot',
+  VALUES ('snapshot-' || to_char(clock_timestamp(), 'YYYYMMDDHH24MISSUS'), 'execute-snapshot',
           '{\\\"data-collections\\\": [\\\"shop.$T\\\"], \\\"type\\\": \\\"incremental\\\"}')\""
 ```
+
+`id` is `varchar(42)` (Debezium's own window markers are a UUID + `-close` = exactly 42), so it
+does not include the table name — a name longer than 18 characters would overflow it; the table is
+named in `data`. `snapshot-` + timestamp to the microsecond = 29 characters, unique per signal.
 
 Check: the topic holds at least as many messages as the table has rows (more if rows changed
 meanwhile), and Debezium logged the snapshot:
@@ -249,5 +253,6 @@ expires with the group's other stale offsets.
   strings inside `before` / `after` (design §4.3).
 - Two platform bugs surfaced by this test and fixed the same day (details in `docs/roadmap.md`,
   phase 4): Polaris OAuth2 tokens expired after ~2 h because the clients refresh only once
-  (token lifetime raised to 30 days), and the sink left records uncommitted when the topics went
-  idle (`CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`).
+  (token lifetime raised to 30 days, and signed with a fixed key so a Polaris restart no longer
+  invalidates them), and the sink left records uncommitted when the topics went idle
+  (`CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`).

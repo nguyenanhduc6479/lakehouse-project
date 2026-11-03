@@ -354,7 +354,10 @@ Sink connector config (`connect/connectors/iceberg-bronze.json`, connector `iceb
 - OAuth2 tokens: the Iceberg REST clients here (the sink, and Trino 454) refresh their token once,
   ~5 min before expiry, and never again — with Polaris' default 1 h lifetime they got HTTP 401
   about 2 h after start (Polaris access log, 2026-11-03). Polaris therefore issues 30-day tokens
-  (`polaris.authentication.token-broker.max-token-generation=P30D`, `compose/catalog.yml`).
+  (`polaris.authentication.token-broker.max-token-generation=P30D`, `compose/catalog.yml`), signed
+  with a fixed HMAC key from `.env` (`token-broker.type=symmetric-key`,
+  `POLARIS_TOKEN_SIGNING_KEY`): the default RSA key pair is regenerated at every Polaris start,
+  which invalidated every token and failed the sink task on each restart.
 - Worker `offset.flush.interval.ms=10000` (default 60 s): while the topics are idle Connect calls
   the sink's `put()` only once per flush interval, and the sink reads its control topic only inside
   `put()`. At 60 s its control consumer kept falling out of its group (45 s session timeout), so

@@ -58,9 +58,13 @@ services:
       # OAuth2 token lifetime (default PT1H). The Iceberg REST clients here (Trino 454, the Iceberg
       # 1.10.2 sink) refresh a token once, ~5 min before expiry, and then never again: they get
       # HTTP 401 about 2 h after start (seen 2026-11-03 in Polaris' access log). 30 days makes that
-      # irrelevant for a demo stack. Tokens are signed with an RSA key pair generated at each
-      # Polaris start, so restarting Polaris invalidates every issued token anyway.
+      # irrelevant for a demo stack.
       polaris.authentication.token-broker.max-token-generation: P30D
+      # Sign tokens with a fixed HMAC key from .env. The default (rsa-key-pair without key files)
+      # generates a new key at every start, which invalidated every token on a Polaris restart: the
+      # Iceberg sink task went FAILED and Trino answered `Not authorized` until restarted by hand.
+      polaris.authentication.token-broker.type: symmetric-key
+      polaris.authentication.token-broker.symmetric-key.secret: ${POLARIS_TOKEN_SIGNING_KEY}
       quarkus.datasource.jdbc.url: jdbc:postgresql://postgres:5432/${POSTGRES_DB_POLARIS}
       quarkus.datasource.username: ${POLARIS_ADMIN_USERNAME}
       quarkus.datasource.password: ${POLARIS_ADMIN_PASSWORD}

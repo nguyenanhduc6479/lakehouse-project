@@ -241,53 +241,35 @@ under `data-platform/bronze/`.
 
 ## Polaris tokens: expiry and reset
 
-Trino and the Iceberg sink talk to Polaris with an OAuth2 token. Polaris issues 30-day tokens
-(`compose/catalog.yml`, `max-token-generation=P30D`; the default 1 h was too short because these
-clients refresh a token only once). A token stops working when:
+Trino and the Iceberg sink talk to Polaris with an OAuth2 token. Polaris signs tokens with a fixed
+HMAC key from `.env` (`POLARIS_TOKEN_SIGNING_KEY`, `token-broker.type=symmetric-key`) and issues
+them for 30 days (`max-token-generation=P30D`), both in `compose/catalog.yml`. So:
 
-- it expires — about 60 days after the client started (30 days + the one refresh);
-- **Polaris restarts** (`restart`, `down`/`up`): it signs tokens with an RSA key generated at
-  startup, so every token issued before is rejected at once.
+- **Restarting Polaris changes nothing** for clients — tokens issued before stay valid (checked
+  2026-11-03: Polaris restarted, Trino kept answering, the sink kept committing, 0 errors).
+- A token stops working only when it **expires** — about 60 days after the client started (these
+  clients refresh once: 30 days + 30) — or when `POLARIS_TOKEN_SIGNING_KEY` is changed.
 
-Spark jobs and Debezium are not affected (a Spark job fetches a new token each run; Debezium
+Spark jobs and Debezium are never affected (a Spark job fetches a new token each run; Debezium
 doesn't use Polaris).
 
-**Symptoms** (all seen when Polaris was restarted on 2026-11-03):
-
-- Trino: `Failed to load table: bronze.orders_cdc` or `Error listing schemas for catalog
-  lakehouse: Not authorized`.
-- Sink: at its next commit with data the **task** goes `FAILED` (`NotAuthorizedException: Not
-  authorized`, "Task is being killed and will not recover until manually restarted") while the
-  **connector** still says `RUNNING` — look at the task state. Lag of `connect-iceberg-bronze`
-  keeps growing (Kafka UI → Consumers).
+**Symptoms**: Trino answers `Not authorized` / `Failed to load table`; the sink **task** goes
+`FAILED` (`NotAuthorizedException`) at its next commit with data while the **connector** still says
+`RUNNING`, and the lag of `connect-iceberg-bronze` keeps growing (Kafka UI → Consumers).
 
 **Reset** — give both clients a new token:
 
 ```bash
-# sink: restart only its failed task (Debezium keeps running)
 docker exec kafka-connect curl -s -o /dev/null -w "%{http_code}\n" -X POST \
-  "http://localhost:8083/connectors/iceberg-bronze/restart?includeTasks=true&onlyFailed=true"   # 202
-
-# Trino
+  "http://localhost:8083/connectors/iceberg-bronze/restart?includeTasks=true"   # 202; Debezium untouched
 docker compose restart trino
 ```
 
-If the token is invalid but the sink has not failed yet (no data since), the `onlyFailed` restart
-does nothing; use `includeTasks=true` without `onlyFailed`, or simply
-`docker compose restart kafka-connect` (also restarts Debezium, which resumes from its offset).
-
-**Check**:
-
-```bash
-docker exec kafka-connect curl -s localhost:8083/connectors/iceberg-bronze/status   # connector + task RUNNING
-docker exec trino trino --execute "SELECT count(*) FROM lakehouse.bronze.orders_cdc"  # answers again
-docker exec kafka kafka-consumer-groups --bootstrap-server kafka:29092 --describe --group connect-iceberg-bronze
-# LAG back to 0 within about a minute
-```
-
-No data is lost: the sink moves its Kafka offsets only with a successful Iceberg commit, so after
-the restart it re-reads from the last commit (checked: bronze rows = Kafka messages, no duplicate
-`_offset`). It has to happen within Kafka's 7-day retention.
+**Check**: `docker exec kafka-connect curl -s localhost:8083/connectors/iceberg-bronze/status`
+(connector + task `RUNNING`), a Trino query answers, and the consumer-group lag is back to 0
+within about a minute. No data is lost: the sink moves its Kafka offsets only with a successful
+Iceberg commit and re-reads from there (tested: bronze rows = Kafka messages, no duplicate
+`_offset`) — as long as it happens within Kafka's 7-day retention.
 
 ## Adding a source table
 

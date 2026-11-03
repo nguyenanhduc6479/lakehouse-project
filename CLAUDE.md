@@ -72,7 +72,9 @@ no HA, replicas, poolers or TLS.
   Volumes are `lakehouse-project_*`.
 - **Under git.** One remote, `origin` → `git@github.com:nguyenanhduc6479/lakehouse-project.git`
   (SSH); `dev` is the working branch (tracks `origin/dev`), `main` the default. `.env` and
-  `.claude/settings.local.json` are gitignored — keep it that way.
+  `.claude/settings.local.json` are gitignored — keep it that way. `.env.example` (committed)
+  lists every variable with placeholder secrets and how to generate them — add each new `.env`
+  variable there too.
 
 ## Architecture (what exists now)
 
@@ -154,13 +156,13 @@ the others by service name. All credentials and tunables live in `.env` and are 
   `catalog_admin`, and creates namespace `bronze` via the Iceberg REST API (only bronze is on
   Iceberg: silver is in Postgres, gold in ClickHouse; the old `silver`/`gold` namespaces were
   dropped 2026-11-03). No credential vending: every engine brings its own S3 keys. **Tokens last
-  30 days** (`polaris.authentication.token-broker.max-token-generation=P30D`): Trino 454 and the
+  30 days** (`polaris.authentication.token-broker.max-token-generation=P30D`; Trino 454 and the
   Iceberg 1.10.2 sink refresh only once, so with the 1 h default they got HTTP 401 ~2 h after
-  start. Restarting Polaris regenerates its RSA signing key, which invalidates every token at once:
-  Trino fails (`Not authorized`) and the sink **task** goes `FAILED` at its next commit while the
-  connector still shows `RUNNING`. Reset (tested 2026-11-03, no data lost): `POST
-  /connectors/iceberg-bronze/restart?includeTasks=true&onlyFailed=true` + `docker compose restart
-  trino` — `docs/services.md` → "Polaris tokens: expiry and reset".
+  start) and are **signed with a fixed HMAC key** (`token-broker.type=symmetric-key`,
+  `symmetric-key.secret=${POLARIS_TOKEN_SIGNING_KEY}` from `.env`): the default RSA key pair was
+  regenerated at every Polaris start and every restart failed the sink task. Now a Polaris restart
+  is harmless; after real expiry (~60 days) or a key change: restart the sink task + Trino
+  (`docs/services.md` → "Polaris tokens: expiry and reset").
 - **Processing** (`compose/spark.yml`): Spark 3.5.1 from `spark/Dockerfile` (`custom-spark:3.5.1`:
   hadoop-aws, `iceberg-spark-runtime` + `iceberg-aws-bundle` **1.10.2** — same as the sink, upgraded
   from 1.5.2 on 2026-11-03 before Spark maintains the bronze tables — Postgres JDBC, kafka-clients;

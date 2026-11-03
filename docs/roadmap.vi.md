@@ -163,7 +163,9 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - Offset (LSN cuối) nằm trong Kafka (`_connect-offsets`), còn slot giữ WAL: khởi động lại thì đọc
   tiếp chính xác ("previous offset ... completed snapshot" → bỏ qua snapshot). Khi Connect dừng,
   slot inactive và WAL dồn lại; kể cả khi active, `confirmed_flush_lsn` vẫn chậm tối đa một lần
-  flush offset (~60 giây), nên slot lag nhỏ nhưng không bằng 0.
+  flush offset, nên slot lag nhỏ nhưng không bằng 0. (Từ phase 4 worker flush mỗi 10 giây thay vì
+  60 giây — `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000` — nên slot lag lúc rảnh dưới ~0,5 KB và
+  Debezium gửi lại ít event trùng hơn sau khi crash.)
 - `timeout`/Ctrl+C trên `docker exec` chỉ giết client phía host: process bên trong container vẫn
   chạy (hai console consumer bị bỏ quên hiện thành group đang sống trong Kafka UI). Với client chạy
   lâu, dùng `docker run --rm`, vì nó chuyển tín hiệu vào container.
@@ -379,6 +381,18 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
     `offset.flush.interval.ms` một lần — 60 giây, lâu hơn session 45 giây. Sửa:
     `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`; các record đang chờ được commit ~65 giây sau mà không
     cần dữ liệu mới, và các lần commit lúc rảnh giờ xong trong ~15 giây thay vì hết thời gian chờ.
+- **Sửa theo review (cùng ngày):**
+  - *Khóa ký token cố định*: broker mặc định `rsa-key-pair` của Polaris (không có file khóa) sinh khóa
+    mới mỗi lần khởi động, nên restart Polaris làm mọi token mất hiệu lực cùng lúc — task của sink
+    thành `FAILED` và Trino báo `Not authorized` cho tới khi restart bằng tay (đã tái hiện). Polaris
+    giờ dùng `token-broker.type=symmetric-key` với `symmetric-key.secret=${POLARIS_TOKEN_SIGNING_KEY}`
+    (biến mới trong `.env`; tên thuộc tính đọc từ jar của 1.5.0). Đã kiểm tra: token là HS256; sau khi
+    restart Polaris, Trino vẫn trả lời và sink commit 20 event mới với 0 lỗi.
+  - *Độ dài id của signal*: `debezium_signal.id` là `varchar(42)` và id `snapshot-<bảng>-<timestamp>`
+    trong runbook bị tràn với tên bảng dài hơn 18 ký tự. Id giờ là `snapshot-<timestamp tới µs>`
+    (29 ký tự; tên bảng nằm trong `data`); đã thử với tên bảng 33 ký tự.
+  - Bài học phase 3 về slot lag đã được cập nhật theo chu kỳ flush 10 giây (slot lag lúc rảnh đo được
+    248–496 byte).
 - Các lưu ý đầu vào cho phase 5 nằm ở mục Phase 5 bên dưới.
 
 **Rút ra được:**

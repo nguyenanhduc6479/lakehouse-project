@@ -158,7 +158,9 @@ generator → source-db ─(2)─→ Debezium → Kafka ─(3)─→ Iceberg bro
 - The offset (last LSN) lives in Kafka (`_connect-offsets`), the slot keeps the WAL: a restart
   resumes exactly ("previous offset ... completed snapshot" → snapshot skipped). While Connect is
   down the slot is inactive and WAL piles up; even while active, `confirmed_flush_lsn` trails by up
-  to one offset flush (~60 s), so slot lag is small but not zero.
+  to one offset flush, so slot lag is small but not zero. (Since phase 4 the worker flushes every
+  10 s instead of 60 s — `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000` — so idle slot lag stays under
+  ~0.5 KB and Debezium re-sends fewer duplicates after a crash.)
 - `timeout`/Ctrl+C on `docker exec` kills only the host-side client: the process inside the
   container keeps running (two forgotten console consumers showed up as live groups in Kafka UI).
   For long-running clients use `docker run --rm`, which forwards signals.
@@ -377,6 +379,19 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
     `offset.flush.interval.ms` when idle — 60 s, longer than the 45 s session. Fix:
     `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`; the pending records were committed ~65 s later
     without new traffic, and idle commits now complete in ~15 s instead of timing out.
+- **Review fixes (same day):**
+  - *Fixed token signing key*: Polaris' default `rsa-key-pair` broker (no key files) generates a key
+    at every start, so a Polaris restart invalidated every token at once — the sink task went
+    `FAILED` and Trino said `Not authorized` until restarted by hand (reproduced). Polaris now uses
+    `token-broker.type=symmetric-key` with `symmetric-key.secret=${POLARIS_TOKEN_SIGNING_KEY}`
+    (new `.env` variable; property names read from the 1.5.0 jars). Checked: tokens are HS256;
+    after a Polaris restart Trino kept answering and the sink committed 20 new events with 0 errors.
+  - *Signal id length*: `debezium_signal.id` is `varchar(42)` and the runbook's id
+    `snapshot-<table>-<timestamp>` overflowed for table names over 18 characters. The id is now
+    `snapshot-<timestamp to µs>` (29 characters; the table is named in `data`); tested with a
+    33-character table name.
+  - The phase-3 lesson on slot lag now reflects the 10 s offset flush (idle lag measured
+    248–496 bytes).
 - Inputs for phase 5 are listed under Phase 5 below.
 
 **Lessons learned:**

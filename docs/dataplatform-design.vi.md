@@ -357,7 +357,10 @@ Cấu hình sink connector (`connect/connectors/iceberg-bronze.json`, connector 
   trước khi hết hạn, rồi không bao giờ làm mới nữa — với thời hạn mặc định 1 giờ của Polaris, chúng
   bị HTTP 401 khoảng 2 giờ sau khi khởi động (access log của Polaris, 2026-11-03). Vì vậy Polaris
   cấp token 30 ngày (`polaris.authentication.token-broker.max-token-generation=P30D`,
-  `compose/catalog.yml`).
+  `compose/catalog.yml`), ký bằng một khóa HMAC cố định trong `.env`
+  (`token-broker.type=symmetric-key`, `POLARIS_TOKEN_SIGNING_KEY`): cặp khóa RSA mặc định được sinh
+  lại mỗi lần Polaris khởi động, làm mọi token mất hiệu lực và khiến task của sink lỗi sau mỗi lần
+  restart.
 - `offset.flush.interval.ms=10000` của worker (mặc định 60 giây): khi các topic không có dữ liệu mới,
   Connect chỉ gọi `put()` của sink mỗi chu kỳ flush một lần, và sink chỉ đọc control topic bên trong
   `put()`. Ở 60 giây, consumer control của nó liên tục rơi khỏi group (session timeout 45 giây), nên
