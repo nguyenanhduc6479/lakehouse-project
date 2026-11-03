@@ -220,7 +220,10 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
 Connectors are registered by the one-shot `connect-setup` job through the Kafka Connect REST API
 (same pattern as the other `*-setup` jobs: idempotent, check every HTTP code): every
 `connect/connectors/<name>.json` is `PUT` to `/connectors/<name>/config` (creates or updates), then
-the job waits until the connector and its task are `RUNNING`.
+the job waits until the connector and its task are `RUNNING`. One job registers all connectors, so
+it waits for everything any of them needs (`source-db-setup` for Debezium, `polaris-setup` for the
+Iceberg sink): a broken catalog also keeps Debezium unregistered. Accepted for the demo; one setup
+job per connector would decouple them.
 
 ### 4.3. Type mapping
 
@@ -323,8 +326,9 @@ Sink connector config (`connect/connectors/iceberg-bronze.json`, connector `iceb
 
 - Routing is static: the sink matches `_topic` against each table's `route-regex` (anchored, so
   each topic maps to exactly one table).
-- `format-version=2`: the Spark cluster runs Iceberg 1.5.2, which can't read v3 tables that a
-  newer sink might create.
+- `format-version=2`: Trino 454 cannot read v3 tables, and v2 has everything bronze needs. Spark
+  runs the same Iceberg version as the sink (**1.10.2**), because it will compact and expire
+  snapshots on these tables while the sink keeps committing (phase 8).
 - `commit.interval-ms=60000`: the default is 5 minutes; one minute keeps the demo responsive.
   Each commit that has data adds one `append` snapshot and one Parquet file per table and day
   (~20 KB each at demo rates) — many small files, which phase 8 compacts.
@@ -344,7 +348,20 @@ Sink connector config (`connect/connectors/iceberg-bronze.json`, connector `iceb
   advanced on a successful Iceberg commit), `connect-iceberg-bronze-coord` and `cg-control-*`
   (the control topic).
 - `_ingested_at` is the Kafka record timestamp, i.e. when Debezium produced the event — not when
-  the sink wrote it. Rows from the initial catch-up therefore carry their original times.
+  the sink wrote it. Rows from the initial catch-up therefore carry their original times. It says
+  nothing about commit order across tables; ordering is always by `source.lsn` (§6.2).
+- `day(_ingested_at)` cuts days in **UTC** (Iceberg stores `timestamptz` as UTC), while the stack
+  runs on `Asia/Ho_Chi_Minh` (UTC+7): events from 00:00 to 07:00 Vietnam time land in the
+  previous day's partition. Silver is unaffected (it reads by snapshot), but a Trino filter on a
+  Vietnam-time day must convert: `WHERE _ingested_at >= TIMESTAMP '2026-11-03 00:00 Asia/Ho_Chi_Minh'`.
+  Kept on purpose: Iceberg's `day()` has no time-zone parameter, and pruning still works — such a
+  filter reads just the two overlapping UTC-day partitions. Alternatives rejected: a Vietnam-time
+  column needs a custom SMT (no built-in one shifts time zones); `hour(_ingested_at)` aligns with
+  Vietnam days but means 24× more partitions. Always filter on `_ingested_at`, not on the
+  partition value.
+- The sink, Trino and Spark all use Polaris' `root` principal — simple and enough for the demo.
+  Least privilege would be one principal per engine (e.g. the sink only allowed to write
+  `bronze`); a possible extension, not part of the plan.
 
 Bronze is queryable from Trino right away, e.g.
 `SELECT op, after.order_id, source.lsn FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20`.
@@ -509,7 +526,9 @@ Bronze is not an Airflow step: the Iceberg sink writes it continuously.
 
 **DAG `platform_maintenance`, also manual:**
 
-- Iceberg compaction / expire snapshots / remove orphan files on bronze (Spark procedures).
+- Iceberg compaction / expire snapshots / remove orphan files on bronze (Spark procedures;
+  `remove_orphan_files` needs `prefix_listing => true` — otherwise it lists files through Hadoop,
+  which has no `s3://` filesystem here, only `s3a://`).
   **Never expire the snapshot stored in `silver.etl_checkpoint`** (or anything newer): the next
   incremental read starts from it and fails if it is gone. Expire only snapshots older than the
   checkpoint.

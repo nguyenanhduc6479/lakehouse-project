@@ -222,6 +222,12 @@ FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20;
 SELECT committed_at, operation, summary['added-records'] AS added, summary['total-records'] AS total
 FROM lakehouse.bronze."orders_cdc$snapshots" ORDER BY committed_at;
 
+-- events of one Vietnam-time day: partitions are UTC days (00:00-07:00 VN = previous UTC day),
+-- so filter on _ingested_at with a zoned literal, not on the partition date
+SELECT count(*) FROM lakehouse.bronze.orders_cdc
+WHERE _ingested_at >= TIMESTAMP '2026-11-03 00:00 Asia/Ho_Chi_Minh'
+  AND _ingested_at <  TIMESTAMP '2026-11-04 00:00 Asia/Ho_Chi_Minh';
+
 -- data files on RustFS (one small Parquet file per table per commit)
 SELECT file_path, record_count, file_size_in_bytes FROM lakehouse.bronze."orders_cdc$files";
 ```

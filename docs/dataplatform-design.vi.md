@@ -225,7 +225,10 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
 Các connector được đăng ký bởi job one-shot `connect-setup` qua Kafka Connect REST API (cùng
 pattern với các job `*-setup` khác: idempotent, kiểm tra mọi mã HTTP): mỗi file
 `connect/connectors/<name>.json` được `PUT` vào `/connectors/<name>/config` (tạo mới hoặc cập nhật),
-rồi job chờ tới khi connector và task của nó `RUNNING`.
+rồi job chờ tới khi connector và task của nó `RUNNING`. Một job đăng ký mọi connector, nên nó chờ
+mọi thứ mà bất kỳ connector nào cần (`source-db-setup` cho Debezium, `polaris-setup` cho Iceberg
+sink): catalog hỏng thì Debezium cũng không được đăng ký. Chấp nhận cho demo; mỗi connector một
+setup job riêng sẽ tách được hai bên.
 
 ### 4.3. Ánh xạ kiểu dữ liệu
 
@@ -325,8 +328,9 @@ Cấu hình sink connector (`connect/connectors/iceberg-bronze.json`, connector 
 
 - Routing là tĩnh: sink so `_topic` với `route-regex` của từng bảng (có neo đầu/cuối, nên mỗi topic
   map đúng vào một bảng).
-- `format-version=2`: Spark cluster chạy Iceberg 1.5.2, không đọc được bảng v3 mà một sink mới hơn
-  có thể tạo ra.
+- `format-version=2`: Trino 454 không đọc được bảng v3, và v2 có đủ những gì bronze cần. Spark chạy
+  cùng phiên bản Iceberg với sink (**1.10.2**), vì nó sẽ compact và expire snapshot trên chính các
+  bảng này trong lúc sink vẫn commit (phase 8).
 - `commit.interval-ms=60000`: mặc định là 5 phút; một phút giúp demo phản hồi nhanh hơn. Mỗi lần
   commit có dữ liệu thêm một snapshot `append` và một file Parquet cho mỗi bảng mỗi ngày (~20 KB mỗi
   file ở tốc độ demo) — rất nhiều file nhỏ, phase 8 sẽ compact.
@@ -345,7 +349,20 @@ Cấu hình sink connector (`connect/connectors/iceberg-bronze.json`, connector 
 - Consumer group trong Kafka UI: `connect-iceberg-bronze` (các topic dữ liệu; offset chỉ tiến khi
   commit Iceberg thành công), `connect-iceberg-bronze-coord` và `cg-control-*` (control topic).
 - `_ingested_at` là timestamp của record Kafka, tức lúc Debezium tạo event — không phải lúc sink ghi.
-  Vì vậy các dòng của lần đọc bù đầu tiên mang thời điểm gốc của chúng.
+  Vì vậy các dòng của lần đọc bù đầu tiên mang thời điểm gốc của chúng. Nó không nói gì về thứ tự
+  commit giữa các bảng; thứ tự luôn theo `source.lsn` (§6.2).
+- `day(_ingested_at)` cắt ngày theo **UTC** (Iceberg lưu `timestamptz` theo UTC), trong khi stack chạy
+  `Asia/Ho_Chi_Minh` (UTC+7): event từ 0h đến 7h giờ Việt Nam nằm ở partition của ngày hôm trước.
+  Silver không bị ảnh hưởng (đọc theo snapshot), nhưng khi lọc theo ngày giờ Việt Nam trong Trino
+  thì phải đổi múi giờ: `WHERE _ingested_at >= TIMESTAMP '2026-11-03 00:00 Asia/Ho_Chi_Minh'`.
+  Giữ nguyên có chủ đích: `day()` của Iceberg không có tham số múi giờ, và partition pruning vẫn
+  hoạt động — filter như trên chỉ đọc hai partition ngày UTC chồng lên khoảng đó. Các cách khác đã
+  loại: thêm cột giờ Việt Nam cần tự viết SMT (không có SMT có sẵn nào đổi múi giờ);
+  `hour(_ingested_at)` khớp được ngày Việt Nam nhưng số partition gấp 24 lần. Luôn lọc theo
+  `_ingested_at`, không lọc theo giá trị partition.
+- Sink, Trino và Spark đều dùng principal `root` của Polaris — đơn giản và đủ cho demo. Theo nguyên
+  tắc quyền tối thiểu thì mỗi engine nên có principal riêng (ví dụ sink chỉ được ghi `bronze`); đây
+  là hướng mở rộng, không nằm trong kế hoạch.
 
 Bronze truy vấn được từ Trino ngay, ví dụ
 `SELECT op, after.order_id, source.lsn FROM lakehouse.bronze.orders_cdc ORDER BY source.lsn DESC LIMIT 20`.
@@ -512,7 +529,9 @@ Bronze không phải là một bước Airflow: Iceberg sink ghi nó liên tục
 
 **DAG `platform_maintenance`, cũng thủ công:**
 
-- Iceberg compaction / expire snapshot / xóa orphan file trên bronze (Spark procedure).
+- Iceberg compaction / expire snapshot / xóa orphan file trên bronze (Spark procedure;
+  `remove_orphan_files` cần `prefix_listing => true` — nếu không nó liệt kê file qua Hadoop, mà ở
+  đây Hadoop không có filesystem `s3://`, chỉ có `s3a://`).
   **Không bao giờ expire snapshot đang lưu trong `silver.etl_checkpoint`** (hoặc bất kỳ snapshot nào
   mới hơn): lần incremental read kế tiếp bắt đầu từ đó và sẽ fail nếu nó mất. Chỉ expire những
   snapshot cũ hơn checkpoint.

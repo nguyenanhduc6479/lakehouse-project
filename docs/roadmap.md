@@ -342,6 +342,23 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - `SELECT * FROM lakehouse.bronze."orders_cdc$snapshots"` shows one `append` snapshot per commit.
 - Spark (Iceberg 1.5.2) can read a bronze table via `helper.get_spark`.
 
+### After the phase — review fixes (2026-11-03)
+
+- **Iceberg in Spark upgraded 1.5.2 → 1.10.2** (`spark/Dockerfile`: `iceberg-spark-runtime-3.5_2.12`
+  + `iceberg-aws-bundle`), the same version as the sink, before phase 8 has Spark maintain the
+  tables the sink writes. Checked on the cluster (Spark 3.5.1, Java 11; Iceberg 1.10.2 is built
+  against Spark 3.5.6 but runs on 3.5.1): the three bronze tables read with the same counts; on a
+  scratch table `bronze._spark_check` (dropped afterwards) — five inserts, `rewrite_data_files`
+  (5 files → 1), `expire_snapshots` (5 data files, 5 manifests removed), `remove_orphan_files`
+  dry run — all work. `remove_orphan_files` needs `prefix_listing => true`: by default it lists
+  through Hadoop, which has no `s3://` filesystem here (`No FileSystem for scheme "s3"`).
+- Documented (design §5): `day(_ingested_at)` cuts days in UTC, so 00:00–07:00 Vietnam time lands
+  in the previous day's partition; the sink, Trino and Spark share Polaris' `root` principal (a
+  per-engine principal is a possible extension); `connect-setup` waits for `polaris-setup`, so a
+  broken catalog also blocks Debezium's registration (accepted; one job per connector would
+  decouple them).
+- Inputs for phase 5 are listed under Phase 5 below.
+
 **Lessons learned:**
 - Read the bytecode, not the release notes: scanning class-file versions of the published jars
   (and later of all 257 bundled jars) answered "does it run on Java 11?" with certainty.
@@ -360,6 +377,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Streaming into Iceberg makes many small files (one per table per commit): fine for a demo,
   compaction is phase 8's job.
 - Python 3.8 in the Spark image: an f-string expression cannot contain a backslash.
+- Keep every engine that writes or maintains a table on the same Iceberg version as the writer;
+  "it reads fine" says nothing about compaction or snapshot expiry under a concurrent writer.
+- Spark procedure arguments must be literals (`TIMESTAMP '...'`, not `current_timestamp()`).
 
 ## Phase 5 — Silver
 
@@ -383,6 +403,16 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Triggering it again with no new events changes nothing (idempotent).
 - A deleted order ends with an `is_deleted = true` current version.
 - Spark transform tests pass in the `spark-master` container.
+
+**Inputs from phase 4** (check while building):
+- Order versions by `source.lsn`, never by `_ingested_at` (Kafka record time, not commit order).
+- Money is `decimal(38,2)` in bronze: cast explicitly to `numeric(18,2)` for silver.
+- Timestamps in `before` / `after` are ISO-8601 strings (UTC, `...Z`): parse them to
+  `timestamptz`.
+- An idle sink commits nothing, so often there is no new snapshot since the checkpoint: the job
+  must treat that as a no-op (empty staging, checkpoint unchanged), not as an error.
+- Bronze can contain duplicate events (Debezium is at-least-once): deduplicate by `source.lsn` per
+  key.
 
 ## Phase 6 — Gold
 

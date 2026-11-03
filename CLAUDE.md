@@ -41,8 +41,8 @@ no HA, replicas, poolers or TLS.
   **done** (2026-11-03): the Iceberg sink `iceberg-bronze` (Iceberg **1.10.2** — the newest with Java
   11 bytecode; the worker runs Java 11) writes `lakehouse.bronze.{users,orders,order_details}_cdc`,
   one commit/snapshot per ~60 s, exactly-once (verified through a Connect restart: bronze rows =
-  Kafka offsets, and rebuilding current state from bronze equals the source); Spark's Iceberg 1.5.2
-  reads them. **Next: phase 5 (silver — SCD2 in Postgres; its design was deferred to that phase).**
+  Kafka offsets, and rebuilding current state from bronze equals the source); Spark (Iceberg 1.10.2)
+  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). **Next: phase 5 (silver — SCD2 in Postgres; its design was deferred to that phase).**
 - **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
   3.3): compose profile `generator`, so a plain `up` never starts it. Rate `GENERATOR_RATE` (`.env`).
   Pitfalls already fixed — keep them: the psycopg connection must be `autocommit=True` (otherwise
@@ -149,7 +149,10 @@ the others by service name. All credentials and tunables live in `.env` and are 
   Postgres, gold in ClickHouse; the old `silver`/`gold` namespaces were dropped 2026-11-03). No
   credential vending: every engine brings its own S3 keys.
 - **Processing** (`compose/spark.yml`): Spark 3.5.1 from `spark/Dockerfile` (`custom-spark:3.5.1`:
-  hadoop-aws, `iceberg-spark-runtime` + `iceberg-aws-bundle` 1.5.2, Postgres JDBC, kafka-clients).
+  hadoop-aws, `iceberg-spark-runtime` + `iceberg-aws-bundle` **1.10.2** — same as the sink, upgraded
+  from 1.5.2 on 2026-11-03 before Spark maintains the bronze tables — Postgres JDBC, kafka-clients;
+  Java 11). Iceberg procedures work; `remove_orphan_files` needs `prefix_listing => true` (no `s3://`
+  Hadoop filesystem, only `s3a://`).
   `spark-master` (RPC 7077, UI 8090, REST 6066), `spark-worker` (UI 8081, size from
   `SPARK_WORKER_CORES`/`SPARK_WORKER_MEMORY`). Jobs in `./spark/jobs` → `/opt/spark/jobs`, `PYTHONPATH=/opt/spark/jobs`. Event logs are
   **off** (nothing read them; no History Server). `spark-defaults.conf` sets

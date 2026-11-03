@@ -345,6 +345,22 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   `append`.
 - Spark (Iceberg 1.5.2) đọc được bảng bronze qua `helper.get_spark`.
 
+### Sau phase — sửa theo review (2026-11-03)
+
+- **Nâng Iceberg trong Spark từ 1.5.2 lên 1.10.2** (`spark/Dockerfile`: `iceberg-spark-runtime-3.5_2.12`
+  + `iceberg-aws-bundle`), cùng phiên bản với sink, trước khi phase 8 cho Spark bảo trì chính các bảng
+  sink đang ghi. Đã kiểm tra trên cluster (Spark 3.5.1, Java 11; Iceberg 1.10.2 build với Spark 3.5.6
+  nhưng chạy được trên 3.5.1): ba bảng bronze đọc ra đúng số dòng như trước; trên bảng tạm
+  `bronze._spark_check` (đã xóa sau đó) — năm lần insert, `rewrite_data_files` (5 file → 1),
+  `expire_snapshots` (xóa 5 data file, 5 manifest), `remove_orphan_files` chạy thử — đều chạy được.
+  `remove_orphan_files` cần `prefix_listing => true`: mặc định nó liệt kê file qua Hadoop, mà ở đây
+  Hadoop không có filesystem `s3://` (`No FileSystem for scheme "s3"`).
+- Đã ghi vào tài liệu (design §5): `day(_ingested_at)` cắt ngày theo UTC, nên 0h–7h giờ Việt Nam nằm ở
+  partition của ngày hôm trước; sink, Trino và Spark dùng chung principal `root` của Polaris (mỗi
+  engine một principal là hướng mở rộng); `connect-setup` chờ `polaris-setup`, nên catalog hỏng cũng
+  chặn việc đăng ký Debezium (chấp nhận; mỗi connector một job sẽ tách được hai bên).
+- Các lưu ý đầu vào cho phase 5 nằm ở mục Phase 5 bên dưới.
+
 **Rút ra được:**
 - Đọc bytecode thay vì đọc release note: quét class-file version của các jar đã phát hành (và sau
   đó của cả 257 jar đóng gói kèm) trả lời chắc chắn câu "có chạy trên Java 11 không?".
@@ -363,6 +379,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Stream vào Iceberg sinh nhiều file nhỏ (mỗi bảng một file mỗi lần commit): ổn cho demo, compaction
   là việc của phase 8.
 - Python 3.8 trong image Spark: biểu thức trong f-string không được chứa dấu backslash.
+- Mọi engine ghi hoặc bảo trì một bảng nên dùng cùng phiên bản Iceberg với bên ghi; "đọc được"
+  không nói lên gì về compaction hay expire snapshot khi có bên khác đang ghi song song.
+- Tham số của Spark procedure phải là hằng (`TIMESTAMP '...'`, không phải `current_timestamp()`).
 
 ## Phase 5 — Silver
 
@@ -386,6 +405,16 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Trigger lại khi không có event mới thì không có gì thay đổi (idempotent).
 - Đơn hàng bị xóa kết thúc bằng một phiên bản hiện hành có `is_deleted = true`.
 - Test Spark transform chạy qua trong container `spark-master`.
+
+**Lưu ý đầu vào từ phase 4** (kiểm tra khi làm):
+- Sắp xếp phiên bản theo `source.lsn`, không bao giờ theo `_ingested_at` (thời điểm record Kafka,
+  không phải thứ tự commit).
+- Tiền trong bronze là `decimal(38,2)`: cast rõ ràng sang `numeric(18,2)` khi ghi silver.
+- Timestamp trong `before` / `after` là chuỗi ISO-8601 (UTC, `...Z`): phải parse sang `timestamptz`.
+- Sink lúc idle không commit gì, nên thường không có snapshot mới kể từ checkpoint: job phải coi đó
+  là no-op (staging rỗng, checkpoint giữ nguyên), không phải lỗi.
+- Bronze có thể chứa event trùng (Debezium là at-least-once): khử trùng theo `source.lsn` cho từng
+  khóa.
 
 ## Phase 6 — Gold
 
