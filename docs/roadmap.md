@@ -357,6 +357,26 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   per-engine principal is a possible extension); `connect-setup` waits for `polaris-setup`, so a
   broken catalog also blocks Debezium's registration (accepted; one job per connector would
   decouple them).
+- **Adding a source table — runbook tested end to end** (`docs/add-source-table.md`): a scratch
+  table `shop.test_products` with 5 existing rows went through schema.sql → both connectors →
+  signal snapshot (5 `r` events) → live insert/update/delete → `bronze.test_products_cdc` (8 rows,
+  correct before/after), then out again with the removal steps (connectors, bronze table, topic +
+  subjects, leftover S3 prefix, publication + table) — no trace left, main pipeline unaffected
+  (30 new events reached bronze afterwards). Needed for it: signal table `public.debezium_signal`
+  (in the publication) + `signal.data.collection`, and a `Filter` SMT (`dropSignals`) because
+  Debezium otherwise publishes the signal table to `src.public.debezium_signal`.
+- **Two platform bugs found by that test, fixed:**
+  - *OAuth2 tokens*: Trino got `Not authorized` on every catalog call. Polaris' access log showed
+    Trino fetched a token at 16:46:40, refreshed it once at 17:41:40, never again, and got HTTP 401
+    from 18:41:46; the sink showed the same pattern (16:25:19 → 17:20:19 → nothing). Polaris accepts
+    the refresh (token exchange returns a fresh 1 h token with `expires_in`), so the clients stop
+    scheduling. Fix: Polaris tokens last 30 days (`max-token-generation=P30D`).
+  - *Idle sink*: after a restart the sink's control consumer rejoined its group every minute and
+    the worker never answered `START_COMMIT` while the topics were idle, so the 8 test records sat
+    uncommitted. Connect calls `put()` (where the sink reads its control topic) only once per
+    `offset.flush.interval.ms` when idle — 60 s, longer than the 45 s session. Fix:
+    `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`; the pending records were committed ~65 s later
+    without new traffic, and idle commits now complete in ~15 s instead of timing out.
 - Inputs for phase 5 are listed under Phase 5 below.
 
 **Lessons learned:**
@@ -379,6 +399,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Python 3.8 in the Spark image: an f-string expression cannot contain a backslash.
 - Keep every engine that writes or maintains a table on the same Iceberg version as the writer;
   "it reads fine" says nothing about compaction or snapshot expiry under a concurrent writer.
+- A real end-to-end run finds what short checks don't: both bugs above only show up after ~2 h
+  (token) or after a restart followed by an idle period (sink). Run things for a while, and read
+  the server's access log — it pinpointed the token problem to the minute.
 - Spark procedure arguments must be literals (`TIMESTAMP '...'`, not `current_timestamp()`).
 
 ## Phase 5 — Silver

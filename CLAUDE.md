@@ -117,6 +117,12 @@ the others by service name. All credentials and tunables live in `.env` and are 
   `docker compose up -d --force-recreate connect-setup`. Sink `iceberg-bronze`
   (`connect/connectors/iceberg-bronze.json`, design §5) reads `POLARIS_SECRET` and `S3_*` as
   `${env:...}` (passed into `kafka-connect`); `connect-setup` also waits for `polaris-setup`.
+  **Adding a source table: `docs/add-source-table.md`** (tested runbook): `schema.sql` block →
+  both connector JSONs → `execute-snapshot` row in signal table `public.debezium_signal` (existing
+  rows are NOT captured otherwise) → bronze; plus the removal steps. Debezium's `dropSignals`
+  `Filter` SMT keeps the signal table out of Kafka. Worker `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`:
+  at the 60 s default the sink's control consumer fell out of its group while idle and pending
+  records never committed.
   Commit mechanics, consumer groups and the harmless `Commit timeout reached` on idle topics:
   design §5; check recipes: `docs/services.md` → "Checking bronze". Bronze money columns are
   `decimal(38,2)`, timestamps inside `before`/`after` stay ISO strings, `_ingested_at` = Kafka
@@ -145,9 +151,16 @@ the others by service name. All credentials and tunables live in `.env` and are 
   creates the `lakehouse` catalog (base location `s3://${S3_BUCKET}/`, RustFS endpoint,
   `pathStyleAccess`, `stsUnavailable=true`,
   `polaris.config.drop-with-purge.enabled=true`), grants `CATALOG_MANAGE_CONTENT` to
-  `catalog_admin`, and creates namespace `bronze` via the Iceberg REST API (only bronze is on Iceberg: silver is in
-  Postgres, gold in ClickHouse; the old `silver`/`gold` namespaces were dropped 2026-11-03). No
-  credential vending: every engine brings its own S3 keys.
+  `catalog_admin`, and creates namespace `bronze` via the Iceberg REST API (only bronze is on
+  Iceberg: silver is in Postgres, gold in ClickHouse; the old `silver`/`gold` namespaces were
+  dropped 2026-11-03). No credential vending: every engine brings its own S3 keys. **Tokens last
+  30 days** (`polaris.authentication.token-broker.max-token-generation=P30D`): Trino 454 and the
+  Iceberg 1.10.2 sink refresh only once, so with the 1 h default they got HTTP 401 ~2 h after
+  start. Restarting Polaris regenerates its RSA signing key, which invalidates every token at once:
+  Trino fails (`Not authorized`) and the sink **task** goes `FAILED` at its next commit while the
+  connector still shows `RUNNING`. Reset (tested 2026-11-03, no data lost): `POST
+  /connectors/iceberg-bronze/restart?includeTasks=true&onlyFailed=true` + `docker compose restart
+  trino` — `docs/services.md` → "Polaris tokens: expiry and reset".
 - **Processing** (`compose/spark.yml`): Spark 3.5.1 from `spark/Dockerfile` (`custom-spark:3.5.1`:
   hadoop-aws, `iceberg-spark-runtime` + `iceberg-aws-bundle` **1.10.2** — same as the sink, upgraded
   from 1.5.2 on 2026-11-03 before Spark maintains the bronze tables — Postgres JDBC, kafka-clients;

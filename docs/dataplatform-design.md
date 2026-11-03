@@ -117,6 +117,9 @@ Design choices:
   tables, via `ALTER DEFAULT PRIVILEGES`); password `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`.
 - Heartbeat table `public.debezium_heartbeat` (one row, `INSERT`/`UPDATE` granted to `debezium`),
   also in the publication — see `heartbeat.action.query` in §4.2.
+- Signal table `public.debezium_signal` (`id`, `type`, `data`; `SELECT/INSERT/UPDATE/DELETE` for
+  `debezium`), also in the publication: a row with `type = 'execute-snapshot'` makes Debezium
+  snapshot a table added later (`docs/add-source-table.md`).
 
 All of it — schema, tables, triggers, CDC setup — lives in **`source/schema.sql`**, applied on
 every `up` by the one-shot **`source-db-setup`** job (`compose/source.yml`, image `postgres:16`,
@@ -184,8 +187,15 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
   "table.include.list": "shop.users,shop.orders,shop.order_details",
   "tombstones.on.delete": "false",
   "decimal.handling.mode": "precise",
+  "signal.data.collection": "public.debezium_signal",
   "heartbeat.interval.ms": "10000",
   "heartbeat.action.query": "INSERT INTO public.debezium_heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
+  "transforms": "dropSignals",
+  "transforms.dropSignals.type": "org.apache.kafka.connect.transforms.Filter",
+  "transforms.dropSignals.predicate": "isSignalTopic",
+  "predicates": "isSignalTopic",
+  "predicates.isSignalTopic.type": "org.apache.kafka.connect.transforms.predicates.TopicNameMatches",
+  "predicates.isSignalTopic.pattern": "src\\.public\\.debezium_signal",
   "key.converter": "io.confluent.connect.avro.AvroConverter",
   "key.converter.schema.registry.url": "http://schema-registry:8081",
   "value.converter": "io.confluent.connect.avro.AvroConverter",
@@ -210,6 +220,13 @@ Subjects use `TopicNameStrategy` (topic `src.shop.orders` → subjects `src.shop
 - `timestamptz` always maps to `ZonedTimestamp` strings; `time.precision.mode` only affects
   `timestamp`/`time` without zone, which the schema doesn't use, so it keeps its default.
 - On first start Debezium snapshots the existing rows (events with `op = r`), then streams the WAL.
+  A table added to `table.include.list` later only gets its changes from then on; its existing
+  rows come through an **incremental snapshot** requested via the signal table
+  (`signal.data.collection`) — it runs alongside streaming and re-reads only that table. Steps:
+  `docs/add-source-table.md`.
+- `transforms` `dropSignals` (Kafka's built-in `Filter` + `TopicNameMatches` predicate): Debezium
+  always captures the signal table, even outside `table.include.list`, and would publish it to
+  `src.public.debezium_signal`; the filter drops those records, so the topic never exists.
 - Debezium **2.7.4.Final**: the base image `cp-kafka-connect:7.6.0` runs Java 11, and Debezium
   3.x needs Java 17. The plugin tarball comes from Maven Central, checksum-verified, in
   `connect/Dockerfile`.
@@ -334,6 +351,15 @@ Sink connector config (`connect/connectors/iceberg-bronze.json`, connector `iceb
   (~20 KB each at demo rates) — many small files, which phase 8 compacts.
 - `rest.auth.type=oauth2` + `oauth2-server-uri`: without them Iceberg 1.10 infers both and logs a
   warning that the token-endpoint fallback will be removed in a future release.
+- OAuth2 tokens: the Iceberg REST clients here (the sink, and Trino 454) refresh their token once,
+  ~5 min before expiry, and never again — with Polaris' default 1 h lifetime they got HTTP 401
+  about 2 h after start (Polaris access log, 2026-11-03). Polaris therefore issues 30-day tokens
+  (`polaris.authentication.token-broker.max-token-generation=P30D`, `compose/catalog.yml`).
+- Worker `offset.flush.interval.ms=10000` (default 60 s): while the topics are idle Connect calls
+  the sink's `put()` only once per flush interval, and the sink reads its control topic only inside
+  `put()`. At 60 s its control consumer kept falling out of its group (45 s session timeout), so
+  records that arrived right before an idle period were never committed. At 10 s idle commits
+  complete in ~15 s.
 - Delivery into Iceberg is exactly-once (Kafka offsets are committed together with the Iceberg
   snapshot; verified by restarting Kafka Connect mid-stream — no missing or duplicated `_offset`).
   Duplicates can still appear because Debezium itself is at-least-once: after a crash it re-sends

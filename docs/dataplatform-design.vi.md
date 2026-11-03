@@ -121,6 +121,9 @@ Lựa chọn thiết kế:
   này, nhờ `ALTER DEFAULT PRIVILEGES`); mật khẩu là `SOURCE_POSTGRES_DB_DEBEZIUM_PASSWORD`.
 - Bảng heartbeat `public.debezium_heartbeat` (một dòng, cấp `INSERT`/`UPDATE` cho `debezium`), cũng
   nằm trong publication — xem `heartbeat.action.query` ở §4.2.
+- Bảng signal `public.debezium_signal` (`id`, `type`, `data`; cấp `SELECT/INSERT/UPDATE/DELETE` cho
+  `debezium`), cũng nằm trong publication: một dòng có `type = 'execute-snapshot'` khiến Debezium
+  snapshot một bảng được thêm vào sau (`docs/add-source-table.md`).
 
 Toàn bộ phần này — schema, bảng, trigger, thiết lập CDC — nằm trong **`source/schema.sql`**, được
 job một lần **`source-db-setup`** (`compose/source.yml`, image `postgres:16`,
@@ -189,8 +192,15 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
   "table.include.list": "shop.users,shop.orders,shop.order_details",
   "tombstones.on.delete": "false",
   "decimal.handling.mode": "precise",
+  "signal.data.collection": "public.debezium_signal",
   "heartbeat.interval.ms": "10000",
   "heartbeat.action.query": "INSERT INTO public.debezium_heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
+  "transforms": "dropSignals",
+  "transforms.dropSignals.type": "org.apache.kafka.connect.transforms.Filter",
+  "transforms.dropSignals.predicate": "isSignalTopic",
+  "predicates": "isSignalTopic",
+  "predicates.isSignalTopic.type": "org.apache.kafka.connect.transforms.predicates.TopicNameMatches",
+  "predicates.isSignalTopic.pattern": "src\\.public\\.debezium_signal",
   "key.converter": "io.confluent.connect.avro.AvroConverter",
   "key.converter.schema.registry.url": "http://schema-registry:8081",
   "value.converter": "io.confluent.connect.avro.AvroConverter",
@@ -215,6 +225,13 @@ Subject dùng `TopicNameStrategy` (topic `src.shop.orders` → subject `src.shop
 - `timestamptz` luôn được map thành chuỗi `ZonedTimestamp`; `time.precision.mode` chỉ ảnh hưởng
   `timestamp`/`time` không có múi giờ, thứ schema không dùng, nên giữ mặc định.
 - Lần khởi động đầu, Debezium snapshot các dòng đang có (event với `op = r`), sau đó stream WAL.
+  Bảng được thêm vào `table.include.list` sau này chỉ nhận các thay đổi từ lúc đó; các dòng có sẵn
+  của nó đi qua **incremental snapshot** được yêu cầu bằng bảng signal (`signal.data.collection`) —
+  chạy song song với streaming và chỉ đọc lại bảng đó. Các bước: `docs/add-source-table.md`.
+- `transforms` `dropSignals` (SMT `Filter` có sẵn của Kafka + predicate `TopicNameMatches`):
+  Debezium luôn bắt thay đổi của bảng signal, kể cả khi bảng không nằm trong `table.include.list`,
+  và sẽ publish ra `src.public.debezium_signal`; filter bỏ các record đó, nên topic không bao giờ
+  được tạo.
 - Debezium **2.7.4.Final**: image gốc `cp-kafka-connect:7.6.0` chạy Java 11, còn Debezium 3.x cần
   Java 17. File tarball của plugin tải từ Maven Central, có kiểm tra checksum, trong
   `connect/Dockerfile`.
@@ -336,6 +353,16 @@ Cấu hình sink connector (`connect/connectors/iceberg-bronze.json`, connector 
   file ở tốc độ demo) — rất nhiều file nhỏ, phase 8 sẽ compact.
 - `rest.auth.type=oauth2` + `oauth2-server-uri`: nếu không khai báo, Iceberg 1.10 tự suy ra cả hai và
   log cảnh báo rằng cơ chế tự suy ra token endpoint sẽ bị bỏ ở bản sau.
+- Token OAuth2: các client Iceberg REST ở đây (sink, và Trino 454) làm mới token một lần, ~5 phút
+  trước khi hết hạn, rồi không bao giờ làm mới nữa — với thời hạn mặc định 1 giờ của Polaris, chúng
+  bị HTTP 401 khoảng 2 giờ sau khi khởi động (access log của Polaris, 2026-11-03). Vì vậy Polaris
+  cấp token 30 ngày (`polaris.authentication.token-broker.max-token-generation=P30D`,
+  `compose/catalog.yml`).
+- `offset.flush.interval.ms=10000` của worker (mặc định 60 giây): khi các topic không có dữ liệu mới,
+  Connect chỉ gọi `put()` của sink mỗi chu kỳ flush một lần, và sink chỉ đọc control topic bên trong
+  `put()`. Ở 60 giây, consumer control của nó liên tục rơi khỏi group (session timeout 45 giây), nên
+  các record đến ngay trước một quãng rảnh không bao giờ được commit. Ở 10 giây, các lần commit lúc
+  rảnh xong trong ~15 giây.
 - Việc ghi vào Iceberg là exactly-once (Kafka offset được commit cùng với Iceberg snapshot; đã kiểm
   tra bằng cách restart Kafka Connect giữa lúc đang ghi — không thiếu, không trùng `_offset`). Bản
   trùng vẫn có thể xuất hiện vì bản thân Debezium là at-least-once: sau khi crash, nó gửi lại các

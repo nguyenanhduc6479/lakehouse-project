@@ -46,6 +46,12 @@ services:
       # connector configs read secrets as ${env:VAR} from this container's environment
       CONNECT_CONFIG_PROVIDERS: env
       CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      # how often source offsets are flushed AND (for sink tasks) the longest wait between two put()
+      # calls while topics are idle. The Iceberg sink reads its control topic only inside put():
+      # at the 60 s default its control consumer kept dropping out of its group (45 s session) and
+      # never answered START_COMMIT, so records that arrived just before an idle period stayed
+      # uncommitted. 10 s keeps it in the group.
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx1g"
       # read by the connector configs as ${env:...}: Debezium (source-shop.json) ...
       SOURCE_POSTGRES_DB: ${SOURCE_POSTGRES_DB}

@@ -239,6 +239,61 @@ the topics are idle is normal. Bronze is complete when its row count equals the 
 (Kafka UI → topic → *Number of messages*). The files themselves are browsable in the RustFS console
 under `data-platform/bronze/`.
 
+## Polaris tokens: expiry and reset
+
+Trino and the Iceberg sink talk to Polaris with an OAuth2 token. Polaris issues 30-day tokens
+(`compose/catalog.yml`, `max-token-generation=P30D`; the default 1 h was too short because these
+clients refresh a token only once). A token stops working when:
+
+- it expires — about 60 days after the client started (30 days + the one refresh);
+- **Polaris restarts** (`restart`, `down`/`up`): it signs tokens with an RSA key generated at
+  startup, so every token issued before is rejected at once.
+
+Spark jobs and Debezium are not affected (a Spark job fetches a new token each run; Debezium
+doesn't use Polaris).
+
+**Symptoms** (all seen when Polaris was restarted on 2026-11-03):
+
+- Trino: `Failed to load table: bronze.orders_cdc` or `Error listing schemas for catalog
+  lakehouse: Not authorized`.
+- Sink: at its next commit with data the **task** goes `FAILED` (`NotAuthorizedException: Not
+  authorized`, "Task is being killed and will not recover until manually restarted") while the
+  **connector** still says `RUNNING` — look at the task state. Lag of `connect-iceberg-bronze`
+  keeps growing (Kafka UI → Consumers).
+
+**Reset** — give both clients a new token:
+
+```bash
+# sink: restart only its failed task (Debezium keeps running)
+docker exec kafka-connect curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  "http://localhost:8083/connectors/iceberg-bronze/restart?includeTasks=true&onlyFailed=true"   # 202
+
+# Trino
+docker compose restart trino
+```
+
+If the token is invalid but the sink has not failed yet (no data since), the `onlyFailed` restart
+does nothing; use `includeTasks=true` without `onlyFailed`, or simply
+`docker compose restart kafka-connect` (also restarts Debezium, which resumes from its offset).
+
+**Check**:
+
+```bash
+docker exec kafka-connect curl -s localhost:8083/connectors/iceberg-bronze/status   # connector + task RUNNING
+docker exec trino trino --execute "SELECT count(*) FROM lakehouse.bronze.orders_cdc"  # answers again
+docker exec kafka kafka-consumer-groups --bootstrap-server kafka:29092 --describe --group connect-iceberg-bronze
+# LAG back to 0 within about a minute
+```
+
+No data is lost: the sink moves its Kafka offsets only with a successful Iceberg commit, so after
+the restart it re-reads from the last commit (checked: bronze rows = Kafka messages, no duplicate
+`_offset`). It has to happen within Kafka's 7-day retention.
+
+## Adding a source table
+
+Step-by-step commands (source table → connectors → snapshot of existing rows via the Debezium
+signal table → bronze), and how to remove a table again: [add-source-table.md](add-source-table.md).
+
 ## Not built yet
 
 Planned by the [roadmap](roadmap.md), ports not assigned yet: ClickHouse, Superset, FastAPI + web

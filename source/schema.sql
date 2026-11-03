@@ -143,3 +143,22 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_publication_tables
                   WHERE pubname = 'dbz_publication'
                     AND schemaname = 'public' AND tablename = 'debezium_heartbeat')
 \gexec
+
+-- Signal table: commands to Debezium written as rows (Debezium "source" signal channel), used to
+-- snapshot a table added to the connector later (`execute-snapshot`, see
+-- docs/add-source-table.md) — otherwise only its changes after the addition would be captured.
+-- Debezium also writes the incremental snapshot's window markers here, hence INSERT/DELETE. Like
+-- the heartbeat table it is in the publication (signals travel through the WAL) but not in
+-- table.include.list, so it gets no Kafka topic. Columns as required by Debezium.
+CREATE TABLE IF NOT EXISTS public.debezium_signal (
+    id    varchar(42)   PRIMARY KEY,
+    type  varchar(32)   NOT NULL,
+    data  varchar(2048)
+);
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.debezium_signal TO debezium;
+
+SELECT 'ALTER PUBLICATION dbz_publication ADD TABLE public.debezium_signal'
+WHERE NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                  WHERE pubname = 'dbz_publication'
+                    AND schemaname = 'public' AND tablename = 'debezium_signal')
+\gexec

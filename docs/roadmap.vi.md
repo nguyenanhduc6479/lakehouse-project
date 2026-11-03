@@ -359,6 +359,26 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   partition của ngày hôm trước; sink, Trino và Spark dùng chung principal `root` của Polaris (mỗi
   engine một principal là hướng mở rộng); `connect-setup` chờ `polaris-setup`, nên catalog hỏng cũng
   chặn việc đăng ký Debezium (chấp nhận; mỗi connector một job sẽ tách được hai bên).
+- **Thêm bảng nguồn — runbook đã chạy thử từ đầu đến cuối** (`docs/add-source-table.md`): bảng tạm
+  `shop.test_products` có sẵn 5 dòng đi qua schema.sql → hai connector → signal snapshot (5 event `r`)
+  → insert/update/delete trực tiếp → `bronze.test_products_cdc` (8 dòng, before/after đúng), rồi được
+  gỡ ra theo các bước gỡ (connector, bảng bronze, topic + subject, prefix S3 còn sót, publication +
+  bảng) — không còn dấu vết, pipeline chính không ảnh hưởng (30 event mới vẫn vào bronze sau đó). Cần
+  thêm: bảng signal `public.debezium_signal` (trong publication) + `signal.data.collection`, và SMT
+  `Filter` (`dropSignals`) vì nếu không Debezium sẽ publish bảng signal ra
+  `src.public.debezium_signal`.
+- **Hai lỗi của platform lộ ra nhờ bài test, đã sửa:**
+  - *Token OAuth2*: Trino báo `Not authorized` với mọi lệnh gọi catalog. Access log của Polaris cho
+    thấy Trino xin token lúc 16:46:40, làm mới một lần lúc 17:41:40, rồi không làm mới nữa, và bị
+    HTTP 401 từ 18:41:46; sink cũng y hệt (16:25:19 → 17:20:19 → không còn gì). Polaris chấp nhận yêu
+    cầu làm mới (token exchange trả token mới 1 giờ có `expires_in`), nên lỗi nằm ở việc client ngừng
+    hẹn lịch làm mới. Sửa: token của Polaris có hạn 30 ngày (`max-token-generation=P30D`).
+  - *Sink lúc rảnh*: sau khi khởi động lại, consumer control của sink phải join lại group mỗi phút và
+    worker không bao giờ trả lời `START_COMMIT` khi các topic rảnh, nên 8 record test nằm chờ không
+    được commit. Khi rảnh, Connect chỉ gọi `put()` (nơi sink đọc control topic) mỗi
+    `offset.flush.interval.ms` một lần — 60 giây, lâu hơn session 45 giây. Sửa:
+    `CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000`; các record đang chờ được commit ~65 giây sau mà không
+    cần dữ liệu mới, và các lần commit lúc rảnh giờ xong trong ~15 giây thay vì hết thời gian chờ.
 - Các lưu ý đầu vào cho phase 5 nằm ở mục Phase 5 bên dưới.
 
 **Rút ra được:**
@@ -381,6 +401,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Python 3.8 trong image Spark: biểu thức trong f-string không được chứa dấu backslash.
 - Mọi engine ghi hoặc bảo trì một bảng nên dùng cùng phiên bản Iceberg với bên ghi; "đọc được"
   không nói lên gì về compaction hay expire snapshot khi có bên khác đang ghi song song.
+- Chạy thật từ đầu đến cuối tìm ra những thứ các phép kiểm tra ngắn bỏ sót: cả hai lỗi trên chỉ lộ
+  ra sau ~2 giờ (token) hoặc sau một lần khởi động lại rồi rảnh (sink). Hãy để hệ thống chạy một
+  thời gian, và đọc access log của server — nó chỉ ra lỗi token chính xác tới từng phút.
 - Tham số của Spark procedure phải là hằng (`TIMESTAMP '...'`, không phải `current_timestamp()`).
 
 ## Phase 5 — Silver
