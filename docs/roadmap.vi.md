@@ -528,6 +528,16 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   fail trong ~1 giây kèm danh sách bảng active (kiểm tra trong job Spark chỉ hiện ra trong Airflow
   dưới dạng `driverState FAILED`, ~1 phút sau). Đã kiểm tra: lần chạy `users` chỉ đụng tới users;
   lần chạy `all` ngay sau đó xử lý hai bảng còn lại; silver vẫn giống hệt nguồn.
+- **`staging.batch` giữ một dòng cho mỗi bảng active** (2026-11-04): job đọc bảng này, thay các
+  dòng của bảng vừa xử lý (`merge_batches`, 2 test host), giữ nguyên các dòng khác cùng
+  `created_at` của chúng, rồi ghi lại — trước đây lần chạy `--table` truncate mất dòng của các bảng
+  khác, nên batch đang chờ của bảng khác phải đợi thêm một lần chạy Spark. Đã kiểm tra: chạy
+  `users` → dòng `orders` không đổi; `all` → 3 dòng; `users` lần nữa → chỉ dòng của nó đổi. Hai cái
+  bẫy gặp trên đường: `ruff check --fix` (target py311) đổi `timezone.utc` thành `datetime.UTC`, gây
+  ImportError trên Python 3.8 của image Spark — sửa tận gốc bằng `per-file-target-version` `py38`
+  cho `spark/jobs/**`; và `.options(**jdbc, url=...)` báo "multiple values for keyword argument" —
+  ba lần chạy fail đó chỉ chứng minh cơ chế an toàn hoạt động (staging bị ghi lại, batch thì
+  không, checkpoint giữ nguyên, lần sau đọc lại hết).
 - Bài học: **một luật gộp áp theo từng batch chỉ đúng nếu ranh giới batch không cắt ngang nhóm.** Ở
   đây batch bị cắt bởi các lần commit của sink, vốn không biết gì về transaction nguồn — nên luật
   phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình

@@ -527,6 +527,16 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   fails in ~1 s with the list of active tables (the Spark job's own check only showed up as
   `driverState FAILED` in Airflow, ~1 min later). Verified: `users` run touched only users;
   the following `all` run did the other two; silver still identical to the source.
+- **`staging.batch` keeps one row per active table** (2026-11-04): the job reads the table,
+  replaces the rows of the tables it processed (`merge_batches`, 2 host tests), keeps the others
+  with their `created_at`, and writes it back — before, a `--table` run truncated the other
+  tables' rows, so a pending batch of another table waited for one more Spark run. Verified:
+  `users` run → `orders` row untouched; `all` → 3 rows; `users` again → only its row changed.
+  Two traps on the way: `ruff check --fix` (target py311) rewrote `timezone.utc` to
+  `datetime.UTC`, an ImportError on the Spark image's Python 3.8 — fixed for good with
+  `per-file-target-version` `py38` for `spark/jobs/**`; and `.options(**jdbc, url=...)` raises
+  "multiple values for keyword argument" — the three failed runs only showed that the safety
+  holds (staging rewritten, batch not, checkpoint unchanged, next run re-read everything).
 - Lesson: **a grouping rule applied per batch is only correct if a batch boundary can't cut the
   group.** Here batches are cut by the sink's commits, which know nothing about source
   transactions — so the rule had to be finished across batches in the apply. Test the boundary,

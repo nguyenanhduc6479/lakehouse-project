@@ -85,7 +85,9 @@ no HA, replicas, poolers or TLS.
   gold phase. `spark-thrift` and dbt-spark were removed (2026-11-02) — nothing uses Spark over JDBC.
 - **Python versions differ by place:** the `custom-spark` image runs **Python 3.8.10** (code must
   stay 3.8-compatible at runtime — `from __future__ import annotations` is what makes `str | None`
-  hints OK), Airflow is 3.11, the host `venv/` is 3.11.
+  hints OK), Airflow is 3.11, the host `venv/` is 3.11. Ruff's target is py311 except
+  `[tool.ruff.per-file-target-version] "spark/jobs/**" = "py38"`: without it `ruff check --fix`
+  rewrote `timezone.utc` to `datetime.UTC` (ImportError on 3.8, syntax still valid).
 - **All `container_name`s are fixed**, so only one copy of this stack can exist per Docker host.
   Volumes are `lakehouse-project_*`.
 - **Under git.** One remote, `origin` → `git@github.com:nguyenanhduc6479/lakehouse-project.git`

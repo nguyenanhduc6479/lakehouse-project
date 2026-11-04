@@ -483,9 +483,13 @@ code. Mỗi lần chạy, cho từng bảng:
    trùng gộp theo (key, `source.lsn`). Event snapshot (`op = r`) dùng chung một LSN và txId;
    `_valid_from` của chúng là thời điểm snapshot — lịch sử trước snapshot là không biết.
 3. Ghi `staging.<table>` qua JDBC với `mode=overwrite` (bảng được tạo lại mỗi lần chạy, nên nhận
-   được cột nguồn mới). Sau đó, **cuối cùng**, ghi lại `staging.batch` (JDBC overwrite với
-   `truncate=true`, giữ nguyên DDL): mỗi bảng một dòng — `start_snapshot_id` (checkpoint mà lần
-   đọc bắt đầu sau nó), `end_snapshot_id` (đọc tới đâu), `row_count`. Trước lần ghi đó
+   được cột nguồn mới). Sau đó, **cuối cùng**, ghi lại `staging.batch`: mỗi bảng active một dòng —
+   `start_snapshot_id` (checkpoint mà lần đọc bắt đầu sau nó), `end_snapshot_id` (đọc tới đâu),
+   `row_count`, `created_at`. Job đọc toàn bộ bảng, thay các dòng của bảng vừa xử lý, giữ nguyên
+   các dòng khác (lần chạy `--table` không được làm mất batch đang chờ của bảng khác), bỏ dòng của
+   bảng không còn active, rồi ghi lại (JDBC overwrite với `truncate=true`, giữ nguyên DDL;
+   `created_at` đi dưới dạng text với `stringtype=unspecified` để dòng được giữ lại giữ nguyên
+   thời gian). Trước lần ghi đó
    `staging.batch` vẫn mô tả lần chạy trước, mà khoảng của nó không bao giờ vượt quá checkpoint,
    nên một lần chạy lỗi chỉ làm silver chậm lại chứ không bao giờ bỏ sót dữ liệu.
 4. Bàn giao cho Airflow (`silver_apply`), cho từng bảng, trong **một transaction Postgres**: bỏ

@@ -246,8 +246,9 @@ or `docker exec airflow-scheduler airflow dags trigger platform_pipeline`). Para
 `all` (default) runs every active table of `config.etl_checkpoint`; a name (`users` or
 `silver.users`) runs only that one — in the UI fill the form, from the CLI add
 `-c '{"table": "users"}'`. A malformed name is refused at trigger time; an unknown one fails
-`silver_spark` within a second, listing the active tables. A one-table run also clears the other
-tables' `staging.batch` rows: their next run simply re-reads from their checkpoints. `silver_spark` stages new
+`silver_spark` within a second, listing the active tables. `staging.batch` always has one row per active
+table: a run replaces the rows of the tables it processed and keeps the others (with their
+`created_at`), so a one-table run never drops another table's pending batch. `silver_spark` stages new
 bronze events, `silver_apply` applies them; its log has one line per table, e.g.
 `silver.orders: snapshots (6610…, 4873…], 129 staged, 0 superseded, 28 versions closed, 129 inserted`
 (*superseded* = versions of a transaction that a sink commit split across two runs, replaced

@@ -480,9 +480,13 @@ by DAG `platform_pipeline` (§9). The job is **generic**: it processes every row
    Duplicates collapse on (key, `source.lsn`). Snapshot events (`op = r`) all share one LSN and
    txId; their `_valid_from` is the snapshot time — history before the snapshot is unknown.
 3. Write `staging.<table>` over JDBC with `mode=overwrite` (the table is recreated each run, so
-   it picks up new source columns). Then, **last**, refill `staging.batch` (JDBC overwrite with
-   `truncate=true`, keeping its DDL): one row per table — `start_snapshot_id` (the checkpoint the
-   read started after), `end_snapshot_id` (read up to), `row_count`. Until that write
+   it picks up new source columns). Then, **last**, rewrite `staging.batch`: one row per active
+   table — `start_snapshot_id` (the checkpoint the read started after), `end_snapshot_id` (read
+   up to), `row_count`, `created_at`. The job reads the whole table, replaces the rows of the
+   tables it processed, keeps the others unchanged (a `--table` run must not drop another
+   table's pending batch), drops rows of inactive tables, and writes it back (JDBC overwrite with
+   `truncate=true`, keeping its DDL; `created_at` travels as text with `stringtype=unspecified`
+   so kept rows keep their time). Until that write
    `staging.batch` still describes the previous run, whose range never goes past the
    checkpoint, so a failed run can make silver lag but never skip data.
 4. Hand over to Airflow (`silver_apply`), which per table, in **one Postgres transaction**:

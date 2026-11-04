@@ -36,5 +36,10 @@ markers = [
 line-length = 100
 target-version = "py311"
 
+# Spark jobs run on the custom-spark image's Python 3.8: keep ruff from "upgrading" them to
+# 3.9+ APIs (e.g. it rewrote timezone.utc to datetime.UTC, an ImportError on 3.8).
+[tool.ruff.per-file-target-version]
+"spark/jobs/**" = "py38"
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

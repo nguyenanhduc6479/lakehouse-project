@@ -6,7 +6,9 @@ For every active `pipeline = 'silver'` row of `config.etl_checkpoint`:
 2. turn the events into version rows (`events_to_versions`, pure — unit-tested);
 3. write them to `staging.<table>` (JDBC overwrite: the table is recreated, so new bronze
    columns show up there).
-Finally `staging.batch` is refilled with one row per table: the snapshot range staging holds.
+Finally `staging.batch` is rewritten with one row per active table — the snapshot range its
+staging table holds: rows of the tables processed now are replaced, the others kept as they were
+(`merge_batches`), so a one-table run doesn't lose another table's pending batch.
 
 The job never touches silver or the checkpoint: Airflow's `silver_apply` (airflow/dags/
 lib/silver_apply.py) applies staging and advances the checkpoint in one Postgres transaction, so a
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import datetime, timezone
 
 from helper import get_spark, postgres_jdbc_options
 from pyspark.sql import DataFrame, SparkSession, Window
@@ -42,6 +45,9 @@ BATCH_SCHEMA = T.StructType(
         T.StructField("start_snapshot_id", T.LongType(), True),
         T.StructField("end_snapshot_id", T.LongType(), True),
         T.StructField("row_count", T.LongType(), False),
+        # text with an offset, cast by Postgres (stringtype=unspecified on the write): a kept row
+        # must keep its original time, and JDBC timestamps would depend on the JVM time zone
+        T.StructField("created_at", T.StringType(), False),
     ]
 )
 
@@ -156,6 +162,17 @@ def select_checkpoints(checkpoints: list, table: str) -> list:
     return selected
 
 
+def merge_batches(existing: list[tuple], new: list[tuple], active: list[str]) -> list[tuple]:
+    """staging.batch rows to write back: `new` replaces the rows of its tables, the existing rows
+    of the other active tables stay unchanged, rows of tables no longer active are dropped.
+
+    Rows are (table_name, start_snapshot_id, end_snapshot_id, row_count, created_at).
+    """
+    merged = {row[0]: row for row in existing if row[0] in active}
+    merged.update({row[0]: row for row in new})
+    return [merged[name] for name in sorted(merged)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="bronze -> staging for the silver layer")
     parser.add_argument("--table", default="all", help="'all' or a silver table, e.g. silver.users")
@@ -174,18 +191,36 @@ def main() -> None:
         .load()
         .collect()
     )
+    active = [cp["table_name"] for cp in checkpoints]
     checkpoints = select_checkpoints(checkpoints, table)
     log.info("tables: %s", ", ".join(cp["table_name"] for cp in checkpoints))
-    batches = [b for b in (process_table(spark, cp, jdbc) for cp in checkpoints) if b]
+    now = datetime.now(timezone.utc).isoformat()
+    batches = [b + (now,) for b in (process_table(spark, cp, jdbc) for cp in checkpoints) if b]
+
     # Written last: until here staging.batch still describes the previous run, whose range is
     # never ahead of the checkpoint, so a failure above can make silver_apply lag, never skip.
-    # truncate=true keeps the table definition (primary key) from postgres/schema.sql. A run for
-    # one table drops the other tables' rows too: their apply then waits for the next Spark run
-    # (which re-reads from their unchanged checkpoints), so nothing is lost.
+    # Read fully (collected) before the write, then written back whole: truncate=true keeps the
+    # table definition (primary key) from postgres/schema.sql.
+    existing = [
+        tuple(r)
+        for r in spark.read.format("jdbc")
+        .options(**jdbc)
+        .option(
+            "query",
+            "SELECT table_name, start_snapshot_id, end_snapshot_id, row_count, "
+            "created_at::text AS created_at FROM staging.batch",
+        )
+        .load()
+        .collect()
+    ]
+    rows = merge_batches(existing, batches, active)
+    for r in rows:
+        log.info("staging.batch: %s (%s, %s] %d rows, %s", *r)
     (
-        spark.createDataFrame(batches, BATCH_SCHEMA)
+        spark.createDataFrame(rows, BATCH_SCHEMA)
         .write.format("jdbc")
-        .options(**jdbc, dbtable="staging.batch", truncate="true")
+        .options(**{**jdbc, "url": jdbc["url"] + "?stringtype=unspecified"})
+        .options(dbtable="staging.batch", truncate="true")
         .mode("overwrite")
         .save()
     )
