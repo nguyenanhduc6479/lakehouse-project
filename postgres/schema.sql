@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS config.etl_checkpoint (
 --   (partial unique index). A deleted key keeps its last version current, with _is_deleted = true.
 -- - _silver_updated_at: when silver last wrote the row (insert or close) — the watermark for ES
 --   and gold, hence the index.
+-- - _tx_id: the source transaction of the version. A sink commit can split one transaction's
+--   events across two silver runs; the apply then replaces the version of the first run instead
+--   of closing it, which would leave a zero-length version (_valid_to = _valid_from).
 -- =========================================================
 
 CREATE SCHEMA IF NOT EXISTS silver;
@@ -60,6 +63,7 @@ CREATE TABLE IF NOT EXISTS silver.users (
     _is_current         boolean     NOT NULL,
     _is_deleted         boolean     NOT NULL DEFAULT false,
     _lsn                bigint      NOT NULL,                -- source.lsn of the event
+    _tx_id              bigint,                              -- source.txId: see silver_apply (split transactions)
     _silver_updated_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, _lsn),
     CHECK ((_valid_to IS NULL) = _is_current),
@@ -91,6 +95,7 @@ CREATE TABLE IF NOT EXISTS silver.orders (
     _is_current         boolean       NOT NULL,
     _is_deleted         boolean       NOT NULL DEFAULT false,
     _lsn                bigint        NOT NULL,
+    _tx_id              bigint,
     _silver_updated_at  timestamptz   NOT NULL DEFAULT now(),
     PRIMARY KEY (order_id, _lsn),
     CHECK ((_valid_to IS NULL) = _is_current),
@@ -127,6 +132,7 @@ CREATE TABLE IF NOT EXISTS silver.order_details (
     _is_current         boolean       NOT NULL,
     _is_deleted         boolean       NOT NULL DEFAULT false,
     _lsn                bigint        NOT NULL,
+    _tx_id              bigint,
     _silver_updated_at  timestamptz   NOT NULL DEFAULT now(),
     PRIMARY KEY (order_detail_id, _lsn),
     CHECK ((_valid_to IS NULL) = _is_current),

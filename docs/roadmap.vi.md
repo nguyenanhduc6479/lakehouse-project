@@ -498,6 +498,30 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - File DAG mới chưa trigger được cho đến khi scheduler serialize nó (`DagNotFound`): chờ lần quét
   thư mục DAG kế tiếp (tối đa 5 phút) hoặc chạy `airflow dags reserialize`.
 
+**Sau phase — sửa theo review (2026-11-04):**
+- **Transaction bị tách → version dài 0 (bug, đã sửa).** Gộp theo transaction chỉ đúng trong một
+  batch, nhưng một lần commit của sink có thể cắt đôi các event của một transaction (bronze đã có 2
+  cặp key/transaction nằm ở hai lần commit). Một lần chạy silver rơi vào giữa hai lần commit sẽ
+  chèn phần đầu làm version hiện tại; lần chạy sau đóng nó với `_valid_to = _valid_from` (CHECK
+  `>=` vẫn cho qua, phép kiểm khoảng hở không thấy). Cách sửa: silver giữ `_tx_id`; bước apply
+  **xóa** trước version hiện tại nếu transaction của nó còn tiếp tục trong staging (câu 0, design
+  §6.4), nên chuỗi version vẫn liền. Silver được dựng lại từ bronze với cột mới (cùng số dòng, giống
+  hệt nguồn); thêm phép kiểm `count(*) WHERE _valid_to = _valid_from = 0` (`docs/services.md`).
+- **Test bước apply SCD2 trên database thật:** `tests/test_silver_apply_db.py` (marker `postgres`,
+  9 test trên DB nháp dựng từ `postgres/schema.sql`): batch đầu, cast kiểu, chạy lại cùng batch,
+  lùi checkpoint, batch chồng lấn, delete, transaction bị tách, batch lỗi thời, cột mới. Test
+  transaction bị tách fail với code apply cũ.
+- 5 lần chạy DAG trong lúc generator đang ghi + 1 lần sau khi dừng: mọi kiểm tra đều đạt, 0 version
+  dài 0, giống hệt nguồn (140 / 718 / 2198).
+- Kiểu của cột mới (giới hạn đã chấp nhận, design §10): cột `timestamptz` mới ở nguồn thành `text`
+  trong silver, `numeric(18,2)` thành `numeric(38,2)`; nếu cần thì sửa bằng cách map kiểu từ Avro
+  schema. Đã thêm vào kịch bản phase 8, cùng với: chạy silver sau compaction bronze, và snapshot lại
+  khi generator đang chạy (CHECK `_valid_to >= _valid_from` có thể fail).
+- Bài học: **một luật gộp áp theo từng batch chỉ đúng nếu ranh giới batch không cắt ngang nhóm.** Ở
+  đây batch bị cắt bởi các lần commit của sink, vốn không biết gì về transaction nguồn — nên luật
+  phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình
+  thường: các lần chạy thật chưa gặp nó, còn test DB thì tái hiện được bất cứ lúc nào.
+
 ## Phase 6 — Gold
 
 **Mục tiêu:** mô hình phân tích trong ClickHouse và dashboard trong Superset.
@@ -540,7 +564,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - [ ] DAG `platform_maintenance` (`schedule=None`): compaction Iceberg / expire snapshot (không bao
   giờ vượt quá checkpoint của silver) / xóa file mồ côi; đối soát số dòng nguồn với silver; độ trễ
   replication slot.
-- [ ] Chạy mọi kịch bản trong design §10 và ghi kết quả vào README.
+- [ ] Chạy mọi kịch bản trong design §10 và ghi kết quả vào README — gồm cả các kịch bản thêm
+  từ review phase 5: kiểu của cột mới trong silver, chạy silver sau compaction bronze, snapshot
+  lại khi generator đang chạy.
 
 **Hoàn thành khi:** mọi kịch bản trong design §10 đều có kết quả được ghi lại.
 

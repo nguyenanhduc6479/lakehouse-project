@@ -27,7 +27,10 @@ testpaths = ["tests"]
 # "Accept timed out") run the rest with:  uv run pytest -m "not spark"
 # Spark tests run in the Linux container:
 #   docker compose exec spark-master bash -c "cd /opt/spark/jobs && python -m pytest ..."
-markers = ["spark: test needs a SparkSession/JVM (runs in the Linux container)"]
+markers = [
+    "spark: test needs a SparkSession/JVM (runs in the Linux container)",
+    "postgres: test needs the stack's Postgres on localhost:5432 + .env credentials (skipped otherwise)",
+]
 
 [tool.ruff]
 line-length = 100

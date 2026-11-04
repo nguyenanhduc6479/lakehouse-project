@@ -12,7 +12,7 @@ def test_quoting():
 
 
 def test_scd2_sql_casts_to_silver_types_and_skips_applied_events():
-    close, insert = build_scd2_sql(
+    supersede, close, insert = build_scd2_sql(
         "silver.orders",
         "staging.orders",
         ["order_id"],
@@ -24,6 +24,9 @@ def test_scd2_sql_casts_to_silver_types_and_skips_applied_events():
             "_lsn": "bigint",
         },
     )
+    # supersede: a current version whose transaction continues in staging
+    assert "st._tx_id = s._tx_id AND st._lsn > s._lsn" in supersede
+    assert 'DELETE FROM "silver"."orders" s' in supersede
     # close: only events newer than the current version, oldest first
     assert "WHERE st._lsn > s._lsn" in close
     assert 'ORDER BY st."order_id", st._lsn' in close
@@ -35,7 +38,7 @@ def test_scd2_sql_casts_to_silver_types_and_skips_applied_events():
 
 
 def test_composite_key():
-    close, insert = build_scd2_sql(
+    _, close, insert = build_scd2_sql(
         "silver.t",
         "staging.t",
         ["a", "b"],

@@ -417,7 +417,11 @@ stopped Debezium makes the WAL grow until the disk fills.
 - **One version per key per transaction.** The generator inserts an order and then updates its
   `total_amount` in the same transaction: two events, same key, same commit time. Only the last
   event of a key within a transaction (`source.txId`) becomes a version; otherwise silver would
-  get a zero-length version (`_valid_from = _valid_to`).
+  get a zero-length version (`_valid_from = _valid_to`). The Spark job can only group events it
+  sees in one batch, and a sink commit can cut a transaction in two (2 such key/transaction pairs
+  were already in bronze on 2026-11-04), so a run may see only its first part. Silver therefore
+  keeps `_tx_id`, and the apply **deletes** a current version whose transaction continues in
+  staging instead of closing it (§6.4, statement 0).
 - **Eventually consistent across tables.** Each table is processed on its own. The three topics
   travel independently, so at a given moment bronze may hold an order whose lines haven't landed
   yet; silver can briefly show it without lines. The next run fills the gap. This is accepted for
@@ -437,6 +441,7 @@ Database `data-platform`, schema `silver`, one table per source table, e.g. `sil
 | `_is_current` | Exactly one current version per key |
 | `_is_deleted` | The key was deleted at the source |
 | `_lsn` | LSN of the event that produced this version |
+| `_tx_id` | Source transaction (`source.txId`) of that event — to finish a transaction split across two runs (§6.2) |
 | `_silver_updated_at` | When silver last wrote this row — the watermark for gold and ES (§7, §8) |
 
 A partial unique index `(order_id) WHERE _is_current` keeps "one current version" true and makes
@@ -489,10 +494,18 @@ by DAG `platform_pipeline` (§9). The job is **generic**: it processes every row
    reads the same range again. Tables are applied independently (silver is eventually
    consistent across tables, §6.2); the task fails at the end if any table failed.
 
-The SCD2 apply is two statements, because `MERGE` can do only one action per matched source row
-while SCD2 needs both "close the old version" and "insert the new one":
+The SCD2 apply is three statements, because `MERGE` can do only one action per matched source
+row while SCD2 needs both "close the old version" and "insert the new one":
 
 ```sql
+-- 0) a current version whose transaction continues in staging (the sink split the transaction
+--    across two runs) is replaced, not closed — closing would leave _valid_to = _valid_from.
+--    The previous version's _valid_to already equals the new event's _valid_from (same commit).
+DELETE FROM silver.orders s
+USING staging.orders st
+WHERE s.order_id = st.order_id AND s._is_current
+  AND st._tx_id = s._tx_id AND st._lsn > s._lsn;
+
 -- 1) close the current version, using the OLDEST staging event that is newer than it.
 --    Staging may also hold already-applied events (re-runs, Debezium duplicates); comparing
 --    only min(_lsn) of the whole batch would miss the close and leave two current versions.
@@ -608,7 +621,9 @@ Bronze is not an Airflow step: the Iceberg sink writes it continuously.
 |---|---|
 | Stop Kafka Connect for a while, then restart | Debezium resumes at the right LSN; WAL piles up meanwhile (watch slot lag) |
 | Stop Kafka Connect until slot lag passes `max_slot_wal_keep_size` | Slot is invalidated; Debezium must re-snapshot. Silver gets a new (same-value) version per row, and rows **deleted during the gap are missed** — a snapshot has no delete events. Shows the trade-off of capping the slot |
-| Add a nullable column at the source while running | New schema registered; bronze and silver extend |
+| Add a nullable column at the source while running | New schema registered; bronze and silver extend. **Known limit:** silver's new column gets staging's type, so a `timestamptz` column becomes `text` and `numeric(18,2)` becomes `numeric(38,2)` until altered by hand (fix if needed: map the type from the Avro schema in Schema Registry — `connect.name = io.debezium.time.ZonedTimestamp` → `timestamptz`, decimal `connect.parameters` precision/scale → `numeric(p,s)`) |
+| Compact bronze (`rewrite_data_files`), then run silver | The incremental read skips the `replace` snapshot: no row missing or duplicated in silver |
+| Re-snapshot (signal or slot loss) while the generator runs | `op = r` events carry the snapshot time; if a streamed event of the same key has a higher LSN but an earlier commit time, `CHECK (_valid_to >= _valid_from)` fails and that table fails on every run until fixed by hand — check how Debezium stamps snapshot events |
 | Incompatible type change | Registry rejects it; Debezium task fails |
 | Rename a column | Passes `BACKWARD`; old column silently null in bronze |
 | Restart Kafka Connect mid-stream | Duplicate events do not corrupt silver |

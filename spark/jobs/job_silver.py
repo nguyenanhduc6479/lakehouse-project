@@ -34,8 +34,6 @@ log = logging.getLogger("job_silver")
 # instant whatever the session time zone; silver_apply casts them to timestamptz.
 TS_FORMAT = "yyyy-MM-dd HH:mm:ss.SSSSSSXXX"
 
-TECHNICAL_COLUMNS = ["_valid_from", "_valid_to", "_is_current", "_is_deleted", "_lsn"]
-
 BATCH_SCHEMA = T.StructType(
     [
         T.StructField("table_name", T.StringType(), False),
@@ -59,6 +57,8 @@ def events_to_versions(events: DataFrame, key_columns: list[str]) -> DataFrame:
       `_valid_from` (commit time of the source transaction, `source.ts_us`), and the last version
       is current.
     The batch may contain events already in silver (re-runs): silver_apply skips them by `_lsn`.
+    `_tx_id` is kept: the grouping by transaction only sees this batch, so silver_apply finishes it
+    across runs (a transaction split by a sink commit).
     """
     is_delete = F.col("op") == "d"
     flat = events.select(
@@ -92,6 +92,7 @@ def events_to_versions(events: DataFrame, key_columns: list[str]) -> DataFrame:
         F.col("_valid_to_us").isNull().alias("_is_current"),
         "_is_deleted",
         "_lsn",
+        "_tx_id",
     )
 
 

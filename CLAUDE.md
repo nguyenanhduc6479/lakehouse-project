@@ -75,7 +75,9 @@ no HA, replicas, poolers or TLS.
   `airflow/dags/platform_pipeline.py` (`schedule=None`, `max_active_runs=1`). A new DAG file is
   triggerable only after the scheduler serializes it (`airflow dags reserialize`, else up to
   5 min; before that `dags trigger` → `DagNotFound`). Tests: `tests/test_job_silver.py` (spark),
-  `tests/test_silver_apply.py` (host), `tests/test_generator.py`; `conftest.py` has a local Spark
+  `tests/test_silver_apply.py` (host), `tests/test_silver_apply_db.py` (marker `postgres`: the
+  SCD2 apply on a scratch DB `silver_apply_test` built from `postgres/schema.sql`, dropped
+  afterwards), `tests/test_generator.py`; `conftest.py` has a local Spark
   fixture.
 - `dbt/` holds only an empty `dbt_project.yml`; dbt-clickhouse (profile + models) arrives in the
   gold phase. `spark-thrift` and dbt-spark were removed (2026-11-02) — nothing uses Spark over JDBC.
@@ -105,7 +107,7 @@ the others by service name. All credentials and tunables live in `.env` and are 
   `config` with `etl_checkpoint`, schema `silver` with the SCD2 tables, schema `staging` with
   `batch`; design §6.3). SCD2/system
   columns start with `_` (`_valid_from`, `_valid_to`, `_is_current`, `_is_deleted`, `_lsn`,
-  `_silver_updated_at`). `source-db` (`compose/source.yml`, host **5433**, DB `source-db`,
+  `_tx_id`, `_silver_updated_at`). `source-db` (`compose/source.yml`, host **5433**, DB `source-db`,
   `SOURCE_POSTGRES_*` in `.env`) is the CDC source, kept separate because `wal_level=logical` and
   slot WAL retention (`max_slot_wal_keep_size=1GB`) are instance-wide. `POSTGRES_*` only apply when
   a volume is first initialised — after changing them, recreate the volume (`down -v`).
@@ -276,7 +278,9 @@ no root `requirements.txt`):
 ```bash
 uv pip install --python venv/bin/python --group dev
 venv/bin/ruff format . && venv/bin/ruff check --fix .
-venv/bin/python -m pytest -m "not spark"     # host tests (no JVM in WSL)
+venv/bin/python -m pytest -m "not spark"     # host tests (no JVM in WSL); `postgres` ones skip
+                                              # unless .env is sourced and the stack is up:
+set -a && . ./.env && set +a && venv/bin/python -m pytest -m postgres
 ```
 
 `@pytest.mark.spark` tests need a JVM — run them in `spark-master` (no pytest there and `tests/`

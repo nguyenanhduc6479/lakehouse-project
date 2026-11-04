@@ -5,8 +5,9 @@ Per table, in ONE Postgres transaction:
 1. check that staging.batch describes a range starting at the current checkpoint (otherwise the
    staging data is stale or belongs to another start point — fail instead of guessing);
 2. add staging columns missing from silver (`ALTER TABLE ... ADD COLUMN`, staging's type);
-3. close the current versions that have a newer staging event, then insert the staging versions
-   silver doesn't have yet (both skip anything at or below silver's `_lsn` -> idempotent);
+3. delete a current version whose transaction continues in staging (split by a sink commit),
+   close the current versions that have a newer staging event, then insert the staging versions
+   silver doesn't have yet (all skip anything at or below silver's `_lsn` -> idempotent);
 4. move the checkpoint to the snapshot staging was read up to.
 Either all of it commits or nothing does. Tables are applied independently (silver is
 eventually consistent across tables): one failing table does not stop the others, but the task
@@ -63,6 +64,17 @@ COLUMNS_SQL = """
     ORDER BY a.attnum
 """
 
+# 0) a current version whose source transaction continues in staging is not a real version: the
+#    sink committed that transaction's events in two snapshots and an earlier run saw only the
+#    first part. Closing it would leave a zero-length version (same commit time), so delete it;
+#    the staging event of the same transaction replaces it with the same _valid_from, and the
+#    previous version's _valid_to already equals that, so the chain stays intact.
+SUPERSEDE_TEMPLATE = """
+    DELETE FROM {silver} s
+    USING {staging} st
+    WHERE {on_keys} AND s._is_current AND st._tx_id = s._tx_id AND st._lsn > s._lsn
+"""
+
 # 1) close the current version with the OLDEST staging event newer than it. Staging may also hold
 #    already-applied events (re-runs, Debezium duplicates), hence the per-key `_lsn` comparison.
 CLOSE_TEMPLATE = """
@@ -113,8 +125,8 @@ def build_scd2_sql(
     key_columns: list[str],
     staging_columns: list[str],
     silver_types: dict[str, str],
-) -> tuple[str, str]:
-    """The two SCD2 statements (close, insert) for one table.
+) -> tuple[str, str, str]:
+    """The SCD2 statements (supersede, close, insert) for one table.
 
     `staging_columns`: staging's columns in order (source columns + technical ones);
     `silver_types`: silver column -> type, used to cast every staging value.
@@ -127,13 +139,14 @@ def build_scd2_sql(
         "on_keys": " AND ".join(f"s.{k} = st.{k}" for k in keys),
         "on_nxt_keys": " AND ".join(f"s.{k} = nxt.{k}" for k in keys),
     }
+    supersede = SUPERSEDE_TEMPLATE.format(**names)
     close = CLOSE_TEMPLATE.format(**names)
     insert = INSERT_TEMPLATE.format(
         **names,
         columns=", ".join(quote_ident(c) for c in staging_columns),
         values=", ".join(f"st.{quote_ident(c)}::{silver_types[c]}" for c in staging_columns),
     )
-    return close, insert
+    return supersede, close, insert
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +191,7 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
             f"{checkpoint}; re-run silver_spark to rebuild staging"
         )
 
-    closed = inserted = 0
+    superseded = closed = inserted = 0
     if rows:
         staging_table = staging_table_of(silver_table)
         staging_types = _columns(cur, staging_table)
@@ -188,9 +201,11 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
             )
         silver_types = _add_missing_columns(cur, silver_table, staging_types)
 
-        close, insert = build_scd2_sql(
+        supersede, close, insert = build_scd2_sql(
             silver_table, staging_table, key_columns, list(staging_types), silver_types
         )
+        cur.execute(supersede)
+        superseded = cur.rowcount
         cur.execute(close)
         closed = cur.rowcount
         cur.execute(insert)
@@ -199,7 +214,7 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
     cur.execute(ADVANCE_CHECKPOINT_SQL, (end, silver_table))
     return (
         f"{silver_table}: snapshots ({start}, {end}], {rows} staged, "
-        f"{closed} versions closed, {inserted} inserted"
+        f"{superseded} superseded, {closed} versions closed, {inserted} inserted"
     )
 
 

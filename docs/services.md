@@ -276,6 +276,7 @@ Consistency checks (stop the generator, wait ~1 min for the sink's last commit, 
 | `count(*) WHERE _is_current AND NOT _is_deleted` | `count(*)` of the table in `source-db` |
 | `count(*) WHERE _is_current` | distinct keys in bronze |
 | `count(*)` | distinct (key, `source.txid`) in bronze (Trino, below) |
+| `count(*) WHERE _valid_to = _valid_from` | 0 (a zero-length version = a transaction split across runs not merged) |
 
 ```sql
 -- Trino: expected silver row count for orders

@@ -419,7 +419,11 @@ xác nhận; Postgres giữ toàn bộ WAL sau đó, nên Debezium bị dừng s
 - **Một version cho mỗi key trong mỗi transaction.** Generator insert một đơn hàng rồi update
   `total_amount` của nó trong cùng transaction: hai event, cùng key, cùng thời điểm commit. Chỉ
   event cuối của một key trong một transaction (`source.txId`) trở thành version; nếu không silver
-  sẽ có version độ dài bằng 0 (`_valid_from = _valid_to`).
+  sẽ có version độ dài bằng 0 (`_valid_from = _valid_to`). Job Spark chỉ gộp được các event nó
+  thấy trong một batch, mà một lần commit của sink có thể cắt đôi một transaction (ngày
+  2026-11-04 bronze đã có 2 cặp key/transaction như vậy), nên một lần chạy có thể chỉ thấy phần
+  đầu. Vì thế silver giữ `_tx_id`, và bước apply **xóa** version hiện tại nếu transaction của nó
+  còn tiếp tục trong staging, thay vì đóng nó (§6.4, câu 0).
 - **Nhất quán sau cùng giữa các bảng.** Mỗi bảng được xử lý riêng. Ba topic di chuyển độc lập, nên
   tại một thời điểm bronze có thể có một đơn hàng mà các dòng chi tiết chưa tới; silver có thể tạm
   hiển thị nó không có dòng nào. Lần chạy kế tiếp lấp chỗ trống. Điều này được chấp nhận cho demo.
@@ -438,6 +442,7 @@ Database `data-platform`, schema `silver`, mỗi bảng nguồn một bảng, v�
 | `_is_current` | Đúng một version hiện tại cho mỗi key |
 | `_is_deleted` | Key đã bị xóa ở nguồn |
 | `_lsn` | LSN của event sinh ra version này |
+| `_tx_id` | Transaction nguồn (`source.txId`) của event đó — để hoàn tất một transaction bị tách qua hai lần chạy (§6.2) |
 | `_silver_updated_at` | Lần cuối silver ghi dòng này — watermark cho gold và ES (§7, §8) |
 
 Một partial unique index `(order_id) WHERE _is_current` đảm bảo "một version hiện tại" luôn đúng và
@@ -491,10 +496,18 @@ code. Mỗi lần chạy, cho từng bảng:
    bảng đó không thay đổi gì, và lần chạy sau đọc lại đúng khoảng đó. Các bảng được apply độc lập
    (silver eventually consistent giữa các bảng, §6.2); task fail ở cuối nếu có bảng lỗi.
 
-Bước apply SCD2 gồm hai câu lệnh, vì `MERGE` chỉ làm được một hành động cho mỗi dòng nguồn khớp,
+Bước apply SCD2 gồm ba câu lệnh, vì `MERGE` chỉ làm được một hành động cho mỗi dòng nguồn khớp,
 trong khi SCD2 cần cả "đóng version cũ" lẫn "chèn version mới":
 
 ```sql
+-- 0) a current version whose transaction continues in staging (the sink split the transaction
+--    across two runs) is replaced, not closed — closing would leave _valid_to = _valid_from.
+--    The previous version's _valid_to already equals the new event's _valid_from (same commit).
+DELETE FROM silver.orders s
+USING staging.orders st
+WHERE s.order_id = st.order_id AND s._is_current
+  AND st._tx_id = s._tx_id AND st._lsn > s._lsn;
+
 -- 1) close the current version, using the OLDEST staging event that is newer than it.
 --    Staging may also hold already-applied events (re-runs, Debezium duplicates); comparing
 --    only min(_lsn) of the whole batch would miss the close and leave two current versions.
@@ -518,7 +531,9 @@ WHERE NOT EXISTS (SELECT 1 FROM silver.orders s
                   WHERE s.order_id = st.order_id AND s._lsn >= st._lsn);
 ```
 
-(Câu 1: đóng version hiện tại bằng event staging **cũ nhất** mà mới hơn nó. Staging có thể chứa cả
+(Câu 0: version hiện tại mà transaction của nó còn tiếp tục trong staging thì bị thay thế chứ
+không bị đóng — đóng sẽ để lại `_valid_to = _valid_from`; version trước đó đã có `_valid_to` bằng
+`_valid_from` của event mới vì cùng thời điểm commit. Câu 1: đóng version hiện tại bằng event staging **cũ nhất** mà mới hơn nó. Staging có thể chứa cả
 event đã apply rồi — do chạy lại hoặc bản trùng từ Debezium; nếu chỉ so `min(_lsn)` của cả batch
 thì sẽ bỏ sót việc đóng version và để lại hai version hiện tại. Câu 2: chèn các version chưa apply,
 bỏ qua những gì đã thấy → idempotent.)
@@ -613,7 +628,9 @@ Bronze không phải là một bước Airflow: Iceberg sink ghi nó liên tục
 |---|---|
 | Dừng Kafka Connect một lúc rồi khởi động lại | Debezium tiếp tục đúng LSN; trong lúc đó WAL dồn lại (theo dõi slot lag) |
 | Dừng Kafka Connect cho tới khi slot lag vượt `max_slot_wal_keep_size` | Slot bị vô hiệu hóa; Debezium phải snapshot lại. Silver nhận một version mới (cùng giá trị) cho mỗi dòng, và các dòng **bị xóa trong khoảng gián đoạn sẽ bị bỏ sót** — snapshot không có event delete. Cho thấy đánh đổi của việc giới hạn slot |
-| Thêm một cột nullable ở nguồn khi đang chạy | Schema mới được đăng ký; bronze và silver mở rộng theo |
+| Thêm một cột nullable ở nguồn khi đang chạy | Schema mới được đăng ký; bronze và silver mở rộng theo. **Giới hạn đã biết:** cột mới ở silver mang kiểu của staging, nên cột `timestamptz` thành `text` và `numeric(18,2)` thành `numeric(38,2)` cho đến khi sửa tay (nếu cần sửa: lấy kiểu từ Avro schema trong Schema Registry — `connect.name = io.debezium.time.ZonedTimestamp` → `timestamptz`, precision/scale trong `connect.parameters` của decimal → `numeric(p,s)`) |
+| Compaction bronze (`rewrite_data_files`), rồi chạy silver | Incremental read bỏ qua snapshot `replace`: silver không thiếu, không trùng dòng nào |
+| Snapshot lại (signal hoặc mất slot) khi generator đang chạy | Event `op = r` mang thời điểm snapshot; nếu một event stream cùng key có LSN lớn hơn nhưng thời điểm commit sớm hơn, `CHECK (_valid_to >= _valid_from)` fail và bảng đó fail ở mọi lần chạy cho tới khi sửa tay — cần kiểm tra Debezium gán thời điểm cho event snapshot thế nào |
 | Đổi kiểu không tương thích | Registry từ chối; task Debezium fail |
 | Đổi tên cột | Qua được `BACKWARD`; cột cũ âm thầm thành null trong bronze |
 | Restart Kafka Connect giữa chừng | Event trùng không làm hỏng silver |

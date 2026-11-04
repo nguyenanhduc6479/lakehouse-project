@@ -497,6 +497,30 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - A new DAG file is not triggerable until the scheduler has serialized it (`DagNotFound`): wait
   for the next DAG-folder scan (up to 5 min) or run `airflow dags reserialize`.
 
+**After the phase — review fixes (2026-11-04):**
+- **Split transaction → zero-length version (bug, fixed).** Grouping by transaction only works
+  inside one batch, but a sink commit can cut a transaction's events in two (bronze already had 2
+  key/transaction pairs in two commits). A silver run between the two commits inserted the first
+  part as current; the next run closed it with `_valid_to = _valid_from` (allowed by the `>=`
+  CHECK, invisible to the gap check). Fix: silver keeps `_tx_id`; the apply first **deletes** a
+  current version whose transaction continues in staging (statement 0, design §6.4), so the chain
+  stays intact. Silver was rebuilt from bronze with the new column (same counts, identical to the
+  source); new check `count(*) WHERE _valid_to = _valid_from = 0` (`docs/services.md`).
+- **SCD2 apply tested on a real database:** `tests/test_silver_apply_db.py` (marker `postgres`,
+  9 tests on a scratch DB built from `postgres/schema.sql`): first batch, casts, same batch again,
+  rewound checkpoint, overlapping batch, delete, split transaction, stale batch, new column. The
+  split-transaction test fails against the old apply.
+- 5 DAG runs while the generator was writing + 1 after draining: all checks hold, 0 zero-length
+  versions, identical to the source (140 / 718 / 2198).
+- New-column types (accepted limit, design §10): a new `timestamptz` source column becomes `text`
+  in silver, `numeric(18,2)` becomes `numeric(38,2)`; mapping types from the Avro schema is the
+  fix if it matters. Added to the phase 8 scenarios with: silver after bronze compaction, and
+  re-snapshot while the generator runs (the `_valid_to >= _valid_from` CHECK may fail).
+- Lesson: **a grouping rule applied per batch is only correct if a batch boundary can't cut the
+  group.** Here batches are cut by the sink's commits, which know nothing about source
+  transactions — so the rule had to be finished across batches in the apply. Test the boundary,
+  not just the steady state: the live runs never hit it, the DB test does on demand.
+
 ## Phase 6 — Gold
 
 **Goal:** analytical models in ClickHouse and a dashboard in Superset.
@@ -540,7 +564,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - [ ] DAG `platform_maintenance` (`schedule=None`): Iceberg compaction / expire snapshots (never
   past the silver checkpoint) / remove orphan files; source-vs-silver row-count check; replication
   slot lag.
-- [ ] Run every scenario in design §10 and record what happened in the README.
+- [ ] Run every scenario in design §10 and record what happened in the README — including the
+  ones added by the phase 5 review: new-column types in silver, silver after bronze compaction,
+  re-snapshot while the generator runs.
 
 **Done when:** every scenario in design §10 has a recorded result.
 
