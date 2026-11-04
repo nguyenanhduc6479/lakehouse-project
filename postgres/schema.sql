@@ -1,5 +1,5 @@
 -- =========================================================
--- data-platform Postgres — silver layer (SCD Type 2 history of shop.*) + ETL checkpoints
+-- data-platform Postgres — silver layer (SCD Type 2 history of shop.*), staging, ETL checkpoints
 -- Design: docs/dataplatform-design.md §6.
 --
 -- Applied to DB `data-platform` by the one-shot `postgres-setup` job (postgres/scripts/init.sh,
@@ -140,6 +140,24 @@ CREATE INDEX IF NOT EXISTS idx_order_details_silver_updated_at
 -- ES sync: an order document is rebuilt from its current lines (design §7)
 CREATE INDEX IF NOT EXISTS idx_order_details_current_order_id
     ON silver.order_details (order_id) WHERE _is_current;
+
+-- =========================================================
+-- Staging: hand-over from the Spark job (bronze -> staging) to silver_apply (staging -> silver).
+-- staging.<table> is dropped and recreated by every Spark run (JDBC overwrite), so it is not
+-- declared here and always has the current bronze columns. staging.batch is truncated and
+-- refilled by the same run (JDBC overwrite + truncate keeps this definition): one row per table
+-- telling silver_apply which bronze range staging.<table> holds.
+-- =========================================================
+
+CREATE SCHEMA IF NOT EXISTS staging;
+
+CREATE TABLE IF NOT EXISTS staging.batch (
+    table_name        text        PRIMARY KEY,   -- target, e.g. 'silver.orders'
+    start_snapshot_id bigint,                    -- checkpoint the read started after (NULL = full read)
+    end_snapshot_id   bigint,                    -- bronze snapshot read up to -> the new checkpoint
+    row_count         bigint      NOT NULL,      -- rows in staging.<table>; 0 = nothing to apply
+    created_at        timestamptz NOT NULL DEFAULT now()
+);
 
 -- ---------------------------------------------------------
 -- Checkpoint rows for the silver step (NULL snapshot = first run reads the whole bronze table).

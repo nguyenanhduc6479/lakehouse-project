@@ -35,6 +35,11 @@ services:
       S3_REGION: ${S3_REGION}
       POLARIS_SECRET: ${POLARIS_SECRET}
       POLARIS_URI: http://polaris:8181/api/catalog
+      # JDBC to the data-platform DB (helper.postgres_jdbc_options): silver / staging / config
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "7077:7077"      # master RPC
       - "8090:8080"      # master web UI (8090 on host, avoids clashing with Trino 8080)
@@ -66,6 +71,11 @@ services:
       S3_REGION: ${S3_REGION}
       POLARIS_SECRET: ${POLARIS_SECRET}
       POLARIS_URI: http://polaris:8181/api/catalog
+      # JDBC to the data-platform DB (helper.postgres_jdbc_options): silver / staging / config
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     command:
       - "/opt/spark/bin/spark-class"
       - "org.apache.spark.deploy.worker.Worker"

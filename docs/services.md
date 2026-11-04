@@ -239,6 +239,58 @@ the topics are idle is normal. Bronze is complete when its row count equals the 
 (Kafka UI → topic → *Number of messages*). The files themselves are browsable in the RustFS console
 under `data-platform/bronze/`.
 
+## Checking silver
+
+Silver is filled by DAG **`platform_pipeline`** (Airflow, http://localhost:8085 → trigger; or
+`docker exec airflow-scheduler airflow dags trigger platform_pipeline`). `silver_spark` stages new
+bronze events, `silver_apply` applies them; its log has one line per table, e.g.
+`silver.orders: snapshots (6610…, 4873…], 129 staged, 28 versions closed, 129 inserted`, or
+`batch already applied ..., skipped` when nothing new arrived. The Spark side is in Grafana
+(`service="spark-job"`).
+
+Connect DataGrip (or `psql`) to `localhost:5432`, DB `data-platform`, user `POSTGRES_USER`:
+
+```sql
+-- where each table's next run starts (NULL = full read), and what the last Spark run staged
+SELECT table_name, last_snapshot_id, updated_at FROM config.etl_checkpoint WHERE pipeline = 'silver';
+SELECT * FROM staging.batch;
+
+-- history of one order
+SELECT order_id, status, total_amount, _valid_from, _valid_to, _is_current, _is_deleted, _lsn
+FROM silver.orders WHERE order_id = 45 ORDER BY _lsn;
+
+-- today's state (what the web app reads)
+SELECT * FROM silver.orders WHERE _is_current AND NOT _is_deleted;
+
+-- the state at a point in time
+SELECT * FROM silver.orders
+WHERE _valid_from <= TIMESTAMPTZ '2026-11-04 09:00+07'
+  AND (_valid_to IS NULL OR _valid_to > TIMESTAMPTZ '2026-11-04 09:00+07')
+  AND NOT _is_deleted;
+```
+
+Consistency checks (stop the generator, wait ~1 min for the sink's last commit, run the DAG):
+
+| Check | Must equal |
+|---|---|
+| `count(*) WHERE _is_current AND NOT _is_deleted` | `count(*)` of the table in `source-db` |
+| `count(*) WHERE _is_current` | distinct keys in bronze |
+| `count(*)` | distinct (key, `source.txid`) in bronze (Trino, below) |
+
+```sql
+-- Trino: expected silver row count for orders
+SELECT count(*) FROM (SELECT DISTINCT coalesce(after.order_id, before.order_id), source.txid
+                      FROM lakehouse.bronze.orders_cdc) t;
+```
+
+Silver has fewer rows than bronze on purpose: Debezium duplicates are dropped, and an insert +
+update of one row in one transaction is a single version.
+
+**Rebuild a table from bronze** (e.g. after changing the transform): in one transaction
+`TRUNCATE silver.orders;` and `UPDATE config.etl_checkpoint SET last_snapshot_id = NULL WHERE
+pipeline = 'silver' AND table_name = 'silver.orders';`, then trigger the DAG. Resetting only the
+checkpoint does nothing — every event is skipped by `_lsn`. Don't do it while a run is active.
+
 ## Polaris tokens: expiry and reset
 
 Trino and the Iceberg sink talk to Polaris with an OAuth2 token. Polaris signs tokens with a fixed

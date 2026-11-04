@@ -42,7 +42,9 @@ no HA, replicas, poolers or TLS.
   11 bytecode; the worker runs Java 11) writes `lakehouse.bronze.{users,orders,order_details}_cdc`,
   one commit/snapshot per ~60 s, exactly-once (verified through a Connect restart: bronze rows =
   Kafka offsets, and rebuilding current state from bronze equals the source); Spark (Iceberg 1.10.2)
-  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). **Next: phase 5 (silver — SCD2 in Postgres; its design was deferred to that phase).**
+  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). Phase 5 is **done** (2026-11-04): DAG `platform_pipeline` (`silver_spark` → `silver_apply`)
+  builds SCD2 history in `data-platform.silver.*` from bronze (design §6.4; checks in
+  `docs/services.md` → "Checking silver"). **Next: phase 6 (gold — ClickHouse + dbt + Superset).**
 - **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
   3.3): compose profile `generator`, so a plain `up` never starts it. Rate `GENERATOR_RATE` (`.env`).
   Pitfalls already fixed — keep them: the psycopg connection must be `autocommit=True` (otherwise
@@ -61,8 +63,18 @@ no HA, replicas, poolers or TLS.
   `airflow` role; Kafka has transaction-log RF 1. Network verified (TCP to every service port +
   app-level checks from Airflow, Kafka, Schema Registry, Spark worker); recipe in `docs/services.md`.
 - `spark/jobs/helper.py` (`get_spark`) builds a SparkSession wired to Polaris + RustFS (S3) — reuse it
-  for every Spark job. `airflow/plugins/spark_rest.py` (`submit_and_wait`) submits a job via the
-  Spark REST API. `airflow/dags/` is empty. `tests/` has only `conftest.py` (a local Spark fixture).
+  for every Spark job; `postgres_jdbc_options()` gives JDBC options for `data-platform` (the Spark
+  services get `POSTGRES_*`). `airflow/plugins/spark_rest.py` (`submit_and_wait`) submits a job
+  via the Spark REST API.
+- **Silver** (design §6.4): `spark/jobs/job_silver.py` (bronze → `staging.<table>` +
+  `staging.batch`) and `airflow/plugins/silver_apply.py` (staging → silver SCD2 + checkpoint, one
+  transaction per table) are **generic** — tables and keys come from `config.etl_checkpoint`
+  (`pipeline = 'silver'`), so a new table needs DDL + a checkpoint row, no code. DAG
+  `airflow/dags/platform_pipeline.py` (`schedule=None`, `max_active_runs=1`). A new DAG file is
+  triggerable only after the scheduler serializes it (`airflow dags reserialize`, else up to
+  5 min; before that `dags trigger` → `DagNotFound`). Tests: `tests/test_job_silver.py` (spark),
+  `tests/test_silver_apply.py` (host), `tests/test_generator.py`; `conftest.py` has a local Spark
+  fixture.
 - `dbt/` holds only an empty `dbt_project.yml`; dbt-clickhouse (profile + models) arrives in the
   gold phase. `spark-thrift` and dbt-spark were removed (2026-11-02) — nothing uses Spark over JDBC.
 - **Python versions differ by place:** the `custom-spark` image runs **Python 3.8.10** (code must
@@ -88,7 +100,8 @@ the others by service name. All credentials and tunables live in `.env` and are 
   default DB `data-platform` (`POSTGRES_DB`, created by initdb) holds silver/staging, and a
   one-shot `postgres-setup` runs `postgres/scripts/init.sh` to idempotently create the `airflow`
   and `polaris` roles/DBs, then applies **`postgres/schema.sql`** to `data-platform` (schema
-  `config` with `etl_checkpoint`, schema `silver` with the SCD2 tables; design §6.3). SCD2/system
+  `config` with `etl_checkpoint`, schema `silver` with the SCD2 tables, schema `staging` with
+  `batch`; design §6.3). SCD2/system
   columns start with `_` (`_valid_from`, `_valid_to`, `_is_current`, `_is_deleted`, `_lsn`,
   `_silver_updated_at`). `source-db` (`compose/source.yml`, host **5433**, DB `source-db`,
   `SOURCE_POSTGRES_*` in `.env`) is the CDC source, kept separate because `wal_level=logical` and

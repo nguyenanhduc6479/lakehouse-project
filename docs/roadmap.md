@@ -10,7 +10,7 @@ Each phase ends with something you can see working; don't start a phase before t
 | 2 | Source | Done |
 | 3 | CDC | Done |
 | 4 | Bronze | Done |
-| 5 | Silver | Not started |
+| 5 | Silver | Done |
 | 6 | Gold | Not started |
 | 7 | Search + API | Not started |
 | 8 | Maintenance + test scenarios | Not started |
@@ -419,21 +419,43 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   the server's access log — it pinpointed the token problem to the minute.
 - Spark procedure arguments must be literals (`TIMESTAMP '...'`, not `current_timestamp()`).
 
-## Phase 5 — Silver
+## Phase 5 — Silver *(done)*
 
 **Goal:** a history-keeping (SCD Type 2) copy of the source in Postgres `data-platform`.
 
-- [x] DDL in `data-platform` (`postgres/schema.sql`, applied by `postgres-setup`; `staging` still to come): schemas `silver` and `staging`, tables `silver.users` /
-  `silver.orders` / `silver.order_details` (design §6.3), partial unique index
-  `(<key>) WHERE _is_current`, table `config.etl_checkpoint`.
-- [ ] `spark/jobs/job_silver.py`: incremental read from the checkpoint snapshot, events →
-  versions (last event per key per transaction, `lead` for `_valid_to`), write
-  `staging.<table>` + `staging.batch`. Transform logic in pure functions with pytest tests.
-- [ ] Postgres credentials for the Spark services (JDBC to `data-platform`); Airflow already has
-  `postgres_conn` pointing at `data-platform`, so no new connection is needed.
-- [ ] Task `silver_apply`: in one transaction, add new columns, run the two SCD2 statements
-  (design §6.4), advance the checkpoint.
-- [ ] DAG `platform_pipeline` (`schedule=None`): `silver_spark` → `silver_apply`.
+- [x] DDL `postgres/schema.sql`, applied idempotently by `postgres-setup` on every `up` (it fails
+  the job on any SQL error): schema `config` with `etl_checkpoint` (one row per
+  `(pipeline, table_name)`: `source_table`, `key_columns`, `last_snapshot_id`, `last_watermark`,
+  `is_active`); schema `silver` with `users` / `orders` / `order_details` (design §6.3) —
+  `PRIMARY KEY (<key>, _lsn)`, partial unique index `(<key>) WHERE _is_current`,
+  `CHECK ((_valid_to IS NULL) = _is_current)`, source strings as `text`, no FKs/CHECKs on source
+  columns; schema `staging` with `staging.batch`. SCD2/system columns start with `_`.
+- [x] `spark/jobs/job_silver.py`, **generic**: the tables and keys come from
+  `config.etl_checkpoint`. Per table: current snapshot from `<table>.refs` (`main`); no new
+  snapshot = no-op; otherwise an Iceberg incremental read `(last_snapshot_id, current]` (full read
+  when NULL); `events_to_versions` (pure function, 6 Spark tests) → `staging.<table>` (JDBC
+  overwrite, recreated each run); `staging.batch` (start, end, row count) is written **last**.
+  `helper.postgres_jdbc_options()`; `POSTGRES_*` added to `spark-master` / `spark-worker`.
+- [x] `airflow/plugins/silver_apply.py` (task `silver_apply`): per table, one transaction —
+  refuse a batch whose start ≠ checkpoint, skip one already applied, `ADD COLUMN` for new staging
+  columns, close + insert (design §6.4) with every value cast to the silver type, advance the
+  checkpoint. Tables are applied independently; the task fails at the end if any failed. SQL
+  builder tested on the host (3 tests).
+- [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply`, `schedule=None`,
+  `max_active_runs=1`.
+- [x] Verified 2026-11-04 (DAG runs on the live stack):
+  - first run (full read): 156 / 640 / 1459 versions; rows = distinct (key, txId) in bronze,
+    current versions = distinct keys, `_is_current AND NOT _is_deleted` = source counts
+    (93 / 426 / 1309), and every current row equals the source column by column;
+  - no-op runs: "batch already applied", nothing changed;
+  - after 90 s of generator: incremental run staged 41 / 129 / 297 rows, closed 23 / 28 / 20
+    versions; all checks above still hold (103 / 506 / 1566, identical to the source); no key
+    with ≠ 1 current version, no gap in any `_valid_from` / `_valid_to` chain;
+  - checkpoint of `orders` rewound one run: 129 events re-read, 0 closed, 0 inserted (idempotent);
+  - a stale `staging.batch` (start ≠ checkpoint): the table fails, checkpoint unchanged, other
+    tables applied;
+  - e.g. order 45: pending → paid → shipped → completed → refunded; a deleted order ends with an
+    `_is_deleted` current version carrying its last values.
 
 **Done when:**
 - Triggering the DAG fills `silver.*`; one order shows several versions with consistent
@@ -442,15 +464,38 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - A deleted order ends with an `_is_deleted = true` current version.
 - Spark transform tests pass in the `spark-master` container.
 
-**Inputs from phase 4** (check while building):
+**Inputs from phase 4** (all handled):
 - Order versions by `source.lsn`, never by `_ingested_at` (Kafka record time, not commit order).
-- Money is `decimal(38,2)` in bronze: cast explicitly to `numeric(18,2)` for silver.
-- Timestamps in `before` / `after` are ISO-8601 strings (UTC, `...Z`): parse them to
-  `timestamptz`.
+- Money is `decimal(38,2)` in bronze: cast explicitly to `numeric(18,2)` for silver — done in the
+  apply SQL (`st.col::numeric(18,2)`).
+- Timestamps in `before` / `after` are ISO-8601 strings (UTC, `...Z`): parsed to `timestamptz` by
+  the same cast.
 - An idle sink commits nothing, so often there is no new snapshot since the checkpoint: the job
-  must treat that as a no-op (empty staging, checkpoint unchanged), not as an error.
-- Bronze can contain duplicate events (Debezium is at-least-once): deduplicate by `source.lsn` per
-  key.
+  treats that as a no-op (`row_count = 0`, checkpoint unchanged).
+- Bronze can contain duplicate events (Debezium is at-least-once): deduplicated on (key, lsn).
+
+**Lessons learned:**
+- **Spark JDBC can only append or overwrite** — no UPDATE/MERGE and no transaction spanning
+  partitions — so SCD2 needs a staging table and a set-based SQL apply in Postgres. That also
+  gives the one place where silver and the checkpoint move together.
+- **Write the "what staging holds" record last, and check it on apply.** With `staging.batch`
+  written after the data and the apply refusing a batch whose start ≠ checkpoint, every failure
+  mode makes silver lag (re-read later, skipped by `_lsn`), never skip data.
+- **Rewinding the checkpoint is the real idempotency test**: it replays already-applied events
+  through the whole path. Comparing rows column by column with the source caught nothing here,
+  but it is the check that would catch a bad cast.
+- **Cast in SQL to the target's types** instead of mirroring types in Spark: staging keeps what
+  Spark produces (text timestamps with an explicit offset, `numeric(38,2)`), Postgres casts to
+  silver's types, and a new source column arrives with staging's type through `ADD COLUMN`.
+  Writing Spark timestamps over JDBC would depend on the session/JVM time zone.
+- **Iceberg snapshot IDs are random**: the current one comes from `<table>.refs` (`main`), and
+  incremental reads follow the parent chain — never compare IDs.
+- Use `source.ts_us`, not `ts_ms`: two transactions on one key in the same millisecond would
+  otherwise give a zero-length version.
+- Snapshot events (`op = r`) all share one LSN and txId, and their `_valid_from` is the snapshot
+  time, not when the row was really created — history before the initial snapshot is unknown.
+- A new DAG file is not triggerable until the scheduler has serialized it (`DagNotFound`): wait
+  for the next DAG-folder scan (up to 5 min) or run `airflow dags reserialize`.
 
 ## Phase 6 — Gold
 

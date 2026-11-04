@@ -457,22 +457,39 @@ snapshot ID là số ngẫu nhiên, nên đọc incremental đi theo chuỗi par
 
 ### 6.4. Job bronze → silver
 
-Mỗi lần chạy `job_silver.py`, cho từng bảng:
+Code: `spark/jobs/job_silver.py` (bước 1–3) và `airflow/plugins/silver_apply.py` (bước 4), do
+DAG `platform_pipeline` chạy (§9). Job **dùng chung**: nó xử lý mọi dòng của
+`config.etl_checkpoint` có `pipeline = 'silver' AND is_active`, dùng `source_table` và
+`key_columns` của dòng đó, nên thêm bảng nguồn mới chỉ cần thêm một dòng checkpoint, không cần
+code. Mỗi lần chạy, cho từng bảng:
 
 1. Chỉ đọc dữ liệu bronze mới: một Iceberg incremental read (`start-snapshot-id`, không bao gồm,
-   tới snapshot hiện tại của bảng) bắt đầu từ snapshot ID đã apply cuối cùng trong
-   `config.etl_checkpoint`. Lần chạy đầu chưa có checkpoint, nên đọc toàn bộ bảng. Bronze là
-   append-only, đúng thứ incremental read hỗ trợ.
+   tới `end-snapshot-id` = snapshot hiện tại của bảng, lấy từ `<table>.refs` với
+   `name = 'main'`) bắt đầu từ snapshot ID đã apply cuối cùng trong `config.etl_checkpoint`. Khi
+   giá trị đó là NULL (lần đầu) thì đọc toàn bộ bảng tại snapshot hiện tại. Không có snapshot mới
+   → không có gì để stage (`row_count = 0`). Bronze là append-only, đúng thứ incremental read hỗ
+   trợ.
 2. Biến event thành các dòng version: `after` cho `c`/`u`/`r`, `before` + `_is_deleted = true` cho
    `d`; chỉ giữ event cuối của mỗi key trong mỗi transaction (§6.2). Trong batch, `_valid_to` =
    `_valid_from` của version kế tiếp cùng key (window `lead` sắp theo `source.lsn`); version cuối
-   của mỗi key là `_is_current`.
+   của mỗi key là `_is_current`. `_valid_from` lấy từ `source.ts_us` (micro giây, nên hai
+   transaction trong cùng một mili giây không bị trùng) và được ghi dạng text có offset rõ ràng
+   (`2026-11-04 10:00:00.000000+07:00`): cùng một thời điểm bất kể time zone của session. Event
+   trùng gộp theo (key, `source.lsn`). Event snapshot (`op = r`) dùng chung một LSN và txId;
+   `_valid_from` của chúng là thời điểm snapshot — lịch sử trước snapshot là không biết.
 3. Ghi `staging.<table>` qua JDBC với `mode=overwrite` (bảng được tạo lại mỗi lần chạy, nên nhận
-   được cột nguồn mới), cộng một dòng trong `staging.batch` với tên bảng và snapshot ID đã đọc tới.
-4. Bàn giao cho Airflow (`silver_apply`), trong **một transaction Postgres**: thêm các cột staging
-   còn thiếu vào silver (`ALTER TABLE ... ADD COLUMN`), chạy các câu lệnh SCD2 bên dưới, và chép
-   snapshot ID từ `staging.batch` sang `config.etl_checkpoint`. Nếu có gì lỗi, không gì thay đổi,
-   và lần chạy sau đọc lại đúng khoảng đó.
+   được cột nguồn mới). Sau đó, **cuối cùng**, ghi lại `staging.batch` (JDBC overwrite với
+   `truncate=true`, giữ nguyên DDL): mỗi bảng một dòng — `start_snapshot_id` (checkpoint mà lần
+   đọc bắt đầu sau nó), `end_snapshot_id` (đọc tới đâu), `row_count`. Trước lần ghi đó
+   `staging.batch` vẫn mô tả lần chạy trước, mà khoảng của nó không bao giờ vượt quá checkpoint,
+   nên một lần chạy lỗi chỉ làm silver chậm lại chứ không bao giờ bỏ sót dữ liệu.
+4. Bàn giao cho Airflow (`silver_apply`), cho từng bảng, trong **một transaction Postgres**: bỏ
+   qua batch đã apply (`end_snapshot_id` = checkpoint); báo lỗi nếu `start_snapshot_id` ≠
+   checkpoint (staging lỗi thời — chạy lại bước Spark); nếu `row_count > 0` thì thêm các cột
+   staging còn thiếu vào silver (`ALTER TABLE ... ADD COLUMN`, kiểu của staging) và chạy các câu
+   lệnh SCD2 bên dưới; rồi chép `end_snapshot_id` sang `config.etl_checkpoint`. Nếu có gì lỗi,
+   bảng đó không thay đổi gì, và lần chạy sau đọc lại đúng khoảng đó. Các bảng được apply độc lập
+   (silver eventually consistent giữa các bảng, §6.2); task fail ở cuối nếu có bảng lỗi.
 
 Bước apply SCD2 gồm hai câu lệnh, vì `MERGE` chỉ làm được một hành động cho mỗi dòng nguồn khớp,
 trong khi SCD2 cần cả "đóng version cũ" lẫn "chèn version mới":
@@ -495,7 +512,7 @@ WHERE s.order_id = nxt.order_id AND s._is_current;
 
 -- 2) insert versions not applied yet (skip anything already seen -> idempotent)
 INSERT INTO silver.orders (<columns from staging>, _silver_updated_at)
-SELECT <columns from staging>, now()
+SELECT <st.column::silver type, for each staging column>, now()
 FROM staging.orders st
 WHERE NOT EXISTS (SELECT 1 FROM silver.orders s
                   WHERE s.order_id = st.order_id AND s._lsn >= st._lsn);
@@ -507,7 +524,15 @@ thì sẽ bỏ sót việc đóng version và để lại hai version hiện t�
 bỏ qua những gì đã thấy → idempotent.)
 
 Danh sách cột được task apply sinh ra từ các cột của `staging`, nên theo kịp schema evolution mà
-không cần sửa tay.
+không cần sửa tay. Mọi giá trị được cast sang kiểu cột của silver (`st.total_amount::numeric(18,2)`,
+`st.ordered_at::timestamptz`, cả `st._valid_from::timestamptz` trong câu 1): staging giữ đúng thứ
+Spark ghi (tiền `numeric(38,2)`, chuỗi timestamp ISO của Debezium dạng `text`), silver giữ kiểu
+của nguồn. Cột thêm sau sẽ có kiểu của staging (một cột timestamp mới sẽ là `text` cho đến khi
+sửa tay).
+
+Dựng lại toàn bộ một bảng từ bronze: trong một transaction `TRUNCATE silver.<table>` và đặt
+`last_snapshot_id` của checkpoint bảng đó về NULL, rồi trigger DAG (chỉ reset checkpoint thì không
+có tác dụng: mọi event đều bị bỏ qua nhờ `_lsn`).
 
 ## 7. Elasticsearch — tìm kiếm
 

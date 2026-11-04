@@ -11,7 +11,7 @@ Mỗi phase kết thúc bằng một thứ nhìn thấy được là đang chạ
 | 2 | Nguồn | Xong |
 | 3 | CDC | Xong |
 | 4 | Bronze | Xong |
-| 5 | Silver | Chưa bắt đầu |
+| 5 | Silver | Xong |
 | 6 | Gold | Chưa bắt đầu |
 | 7 | Search + API | Chưa bắt đầu |
 | 8 | Bảo trì + kịch bản kiểm thử | Chưa bắt đầu |
@@ -420,21 +420,42 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   thời gian, và đọc access log của server — nó chỉ ra lỗi token chính xác tới từng phút.
 - Tham số của Spark procedure phải là hằng (`TIMESTAMP '...'`, không phải `current_timestamp()`).
 
-## Phase 5 — Silver
+## Phase 5 — Silver *(xong)*
 
 **Mục tiêu:** bản sao có lịch sử (SCD Type 2) của nguồn trong Postgres `data-platform`.
 
-- [x] DDL trong `data-platform` (`postgres/schema.sql`, do `postgres-setup` chạy; `staging` làm sau): schema `silver` và `staging`, các bảng `silver.users` /
-  `silver.orders` / `silver.order_details` (design §6.3), partial unique index
-  `(<key>) WHERE _is_current`, bảng `config.etl_checkpoint`.
-- [ ] `spark/jobs/job_silver.py`: đọc incremental từ snapshot trong checkpoint, chuyển event thành
-  phiên bản (mỗi khóa chỉ lấy event cuối trong một transaction, dùng `lead` để tính `_valid_to`), ghi
-  `staging.<table>` + `staging.batch`. Logic transform viết thành hàm thuần, có test pytest.
-- [ ] Credential Postgres cho các service Spark (JDBC tới `data-platform`); Airflow đã có sẵn
-  `postgres_conn` trỏ tới `data-platform`, nên không cần thêm connection mới.
-- [ ] Task `silver_apply`: trong một transaction, thêm cột mới, chạy hai câu SCD2 (design §6.4),
-  đẩy checkpoint lên.
-- [ ] DAG `platform_pipeline` (`schedule=None`): `silver_spark` → `silver_apply`.
+- [x] DDL `postgres/schema.sql`, do `postgres-setup` chạy (idempotent) mỗi lần `up` (lỗi SQL thì
+  job fail): schema `config` với `etl_checkpoint` (mỗi `(pipeline, table_name)` một dòng:
+  `source_table`, `key_columns`, `last_snapshot_id`, `last_watermark`, `is_active`); schema
+  `silver` với `users` / `orders` / `order_details` (design §6.3) — `PRIMARY KEY (<key>, _lsn)`,
+  partial unique index `(<key>) WHERE _is_current`, `CHECK ((_valid_to IS NULL) = _is_current)`,
+  chuỗi nguồn là `text`, không FK/CHECK trên cột nguồn; schema `staging` với `staging.batch`.
+  Cột SCD2/hệ thống bắt đầu bằng `_`.
+- [x] `spark/jobs/job_silver.py`, **dùng chung**: danh sách bảng và key lấy từ
+  `config.etl_checkpoint`. Mỗi bảng: snapshot hiện tại lấy từ `<table>.refs` (`main`); không có
+  snapshot mới = no-op; ngược lại đọc incremental Iceberg `(last_snapshot_id, current]` (NULL thì
+  đọc toàn bộ); `events_to_versions` (hàm thuần, 6 test Spark) → `staging.<table>` (JDBC
+  overwrite, tạo lại mỗi lần chạy); `staging.batch` (start, end, số dòng) được ghi **cuối cùng**.
+  `helper.postgres_jdbc_options()`; thêm `POSTGRES_*` cho `spark-master` / `spark-worker`.
+- [x] `airflow/plugins/silver_apply.py` (task `silver_apply`): mỗi bảng một transaction — từ chối
+  batch có start ≠ checkpoint, bỏ qua batch đã áp, `ADD COLUMN` cho cột staging mới, đóng + chèn
+  (design §6.4) với mọi giá trị được cast sang kiểu của silver, đẩy checkpoint lên. Các bảng áp
+  độc lập; task fail ở cuối nếu có bảng lỗi. Phần sinh SQL có test trên host (3 test).
+- [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply`, `schedule=None`,
+  `max_active_runs=1`.
+- [x] Đã kiểm tra 2026-11-04 (chạy DAG trên stack thật):
+  - lần đầu (đọc toàn bộ): 156 / 640 / 1459 phiên bản; số dòng = số cặp (key, txId) khác nhau
+    trong bronze, số phiên bản hiện tại = số key, `_is_current AND NOT _is_deleted` = số dòng ở
+    nguồn (93 / 426 / 1309), và mọi dòng hiện tại giống nguồn tới từng cột;
+  - chạy lại khi không có gì mới: "batch already applied", không thay đổi gì;
+  - sau 90 giây chạy generator: lần incremental stage 41 / 129 / 297 dòng, đóng 23 / 28 / 20
+    phiên bản; mọi kiểm tra trên vẫn đúng (103 / 506 / 1566, giống hệt nguồn); không key nào có
+    ≠ 1 phiên bản hiện tại, chuỗi `_valid_from` / `_valid_to` không có khoảng hở;
+  - lùi checkpoint của `orders` một lần chạy: đọc lại 129 event, đóng 0, chèn 0 (idempotent);
+  - `staging.batch` lỗi thời (start ≠ checkpoint): bảng đó fail, checkpoint giữ nguyên, các bảng
+    khác vẫn áp;
+  - ví dụ order 45: pending → paid → shipped → completed → refunded; order bị xóa kết thúc bằng
+    phiên bản hiện tại `_is_deleted` mang giá trị cuối cùng của nó.
 
 **Hoàn thành khi:**
 - Trigger DAG thì `silver.*` có dữ liệu; một đơn hàng có nhiều phiên bản với `_valid_from` /
@@ -443,15 +464,39 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - Đơn hàng bị xóa kết thúc bằng một phiên bản hiện hành có `_is_deleted = true`.
 - Test Spark transform chạy qua trong container `spark-master`.
 
-**Lưu ý đầu vào từ phase 4** (kiểm tra khi làm):
+**Lưu ý đầu vào từ phase 4** (đã xử lý hết):
 - Sắp xếp phiên bản theo `source.lsn`, không bao giờ theo `_ingested_at` (thời điểm record Kafka,
   không phải thứ tự commit).
-- Tiền trong bronze là `decimal(38,2)`: cast rõ ràng sang `numeric(18,2)` khi ghi silver.
-- Timestamp trong `before` / `after` là chuỗi ISO-8601 (UTC, `...Z`): phải parse sang `timestamptz`.
-- Sink lúc idle không commit gì, nên thường không có snapshot mới kể từ checkpoint: job phải coi đó
-  là no-op (staging rỗng, checkpoint giữ nguyên), không phải lỗi.
-- Bronze có thể chứa event trùng (Debezium là at-least-once): khử trùng theo `source.lsn` cho từng
-  khóa.
+- Tiền trong bronze là `decimal(38,2)`: cast rõ ràng sang `numeric(18,2)` khi ghi silver — làm
+  trong SQL apply (`st.col::numeric(18,2)`).
+- Timestamp trong `before` / `after` là chuỗi ISO-8601 (UTC, `...Z`): được parse sang
+  `timestamptz` bằng cùng phép cast đó.
+- Sink lúc idle không commit gì, nên thường không có snapshot mới kể từ checkpoint: job coi đó là
+  no-op (`row_count = 0`, checkpoint giữ nguyên).
+- Bronze có thể chứa event trùng (Debezium là at-least-once): khử trùng theo (key, lsn).
+
+**Rút ra được:**
+- **Spark JDBC chỉ append hoặc overwrite** — không UPDATE/MERGE, không có transaction chung cho
+  các partition — nên SCD2 cần bảng staging và bước apply bằng SQL trên tập dữ liệu trong
+  Postgres. Đó cũng là chỗ duy nhất silver và checkpoint cùng tiến lên.
+- **Ghi bản mô tả "staging đang chứa gì" sau cùng, và kiểm tra nó khi apply.** `staging.batch`
+  ghi sau dữ liệu, bước apply từ chối batch có start ≠ checkpoint: mọi kiểu lỗi chỉ làm silver
+  chậm lại (đọc lại sau, bỏ qua nhờ `_lsn`), không bao giờ bỏ sót dữ liệu.
+- **Lùi checkpoint mới là phép thử idempotent thật**: nó cho các event đã áp đi lại toàn bộ đường
+  ống. So từng cột với nguồn lần này không bắt được lỗi gì, nhưng đó là phép kiểm tra sẽ bắt được
+  một phép cast sai.
+- **Cast sang kiểu đích bằng SQL** thay vì bắt chước kiểu trong Spark: staging giữ đúng thứ Spark
+  sinh ra (timestamp dạng text có offset, `numeric(38,2)`), Postgres cast sang kiểu của silver,
+  và cột nguồn mới đi vào bằng `ADD COLUMN` với kiểu của staging. Ghi timestamp Spark qua JDBC sẽ
+  phụ thuộc time zone của session/JVM.
+- **Snapshot ID của Iceberg là số ngẫu nhiên**: snapshot hiện tại lấy từ `<table>.refs` (`main`),
+  đọc incremental đi theo chuỗi parent — không bao giờ so sánh ID.
+- Dùng `source.ts_us` chứ không phải `ts_ms`: hai transaction trên cùng một key trong cùng một
+  mili giây sẽ cho phiên bản độ dài bằng 0.
+- Event snapshot (`op = r`) dùng chung một LSN và txId, và `_valid_from` của chúng là thời điểm
+  snapshot, không phải lúc dòng thật sự được tạo — lịch sử trước snapshot đầu tiên là không biết.
+- File DAG mới chưa trigger được cho đến khi scheduler serialize nó (`DagNotFound`): chờ lần quét
+  thư mục DAG kế tiếp (tối đa 5 phút) hoặc chạy `airflow dags reserialize`.
 
 ## Phase 6 — Gold
 

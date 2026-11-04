@@ -164,7 +164,14 @@ Right after the `CREATE`, Trino may answer `Table ... does not exist` until the 
 
 ### 5. Downstream
 
-- **Silver** (phase 5) and **gold** (phase 6): add the table there once those layers exist.
+- **Silver** (no code — `job_silver.py` and `silver_apply` are generic): in `postgres/schema.sql`
+  add a `silver.$T` block (copy `silver.orders`: source columns with strings as `text`, the `_`
+  technical columns, `PRIMARY KEY (<key>, _lsn)`, the two CHECKs, the `WHERE _is_current` unique
+  index, a `_silver_updated_at` index) and a checkpoint row
+  `('silver', 'silver.$T', 'lakehouse.bronze.${T}_cdc', '{<key>}')` in the `INSERT ... ON CONFLICT
+  DO NOTHING` at the end, then `docker compose up -d --force-recreate postgres-setup` and trigger
+  `platform_pipeline` (the first run reads the whole bronze table).
+- **Gold** (phase 6): add the table there once that layer exists.
 - **Generator**: only if the demo should write the table continuously (`source/generator.py`).
 - Keep the docs current: the source tables in `docs/dataplatform-design.md` §3.1 and the lists in
   `CLAUDE.md`.

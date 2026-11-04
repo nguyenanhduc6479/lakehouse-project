@@ -34,6 +34,20 @@ def s3_bucket() -> str:
     return _env("S3_BUCKET", "data-platform")
 
 
+def postgres_jdbc_options() -> dict[str, str]:
+    """JDBC options for the `data-platform` Postgres DB (silver, staging, config schemas).
+
+    Use as `spark.read.format("jdbc").options(**postgres_jdbc_options(), dbtable=...)`.
+    """
+    host = _env("POSTGRES_HOST", "postgres")
+    return {
+        "url": f"jdbc:postgresql://{host}:5432/{_env('POSTGRES_DB')}",
+        "user": _env("POSTGRES_USER"),
+        "password": _env("POSTGRES_PASSWORD"),
+        "driver": "org.postgresql.Driver",
+    }
+
+
 def get_spark(app_name: str, *, extra_conf: dict[str, str] | None = None) -> SparkSession:
     """Build a SparkSession wired to Polaris (Iceberg REST + OAuth2) and RustFS (S3).
 
