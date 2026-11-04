@@ -417,14 +417,14 @@ stopped Debezium makes the WAL grow until the disk fills.
 - **One version per key per transaction.** The generator inserts an order and then updates its
   `total_amount` in the same transaction: two events, same key, same commit time. Only the last
   event of a key within a transaction (`source.txId`) becomes a version; otherwise silver would
-  get a zero-length version (`valid_from = valid_to`).
+  get a zero-length version (`_valid_from = _valid_to`).
 - **Eventually consistent across tables.** Each table is processed on its own. The three topics
   travel independently, so at a given moment bronze may hold an order whose lines haven't landed
   yet; silver can briefly show it without lines. The next run fills the gap. This is accepted for
   the demo. (Strict per-transaction consistency would need Debezium's
   `provide.transaction.metadata` and applying only transactions whose event count is complete —
   a possible later exercise.)
-- Deletes become a final version with `is_deleted = true` (values from `before`).
+- Deletes become a final version with `_is_deleted = true` (values from `before`).
 
 ### 6.3. Silver tables
 
@@ -433,33 +433,45 @@ Database `data-platform`, schema `silver`, one table per source table, e.g. `sil
 | Column | Meaning |
 |---|---|
 | source columns | `order_id`, `user_id`, `status`, … |
-| `valid_from`, `valid_to` | Version validity, from `source.ts_ms` (commit time of the source transaction); `valid_to` null for the current version |
-| `is_current` | Exactly one current version per key |
-| `is_deleted` | The key was deleted at the source |
+| `_valid_from`, `_valid_to` | Version validity, from `source.ts_ms` (commit time of the source transaction); `_valid_to` null for the current version |
+| `_is_current` | Exactly one current version per key |
+| `_is_deleted` | The key was deleted at the source |
 | `_lsn` | LSN of the event that produced this version |
 | `_silver_updated_at` | When silver last wrote this row — the watermark for gold and ES (§7, §8) |
 
-A partial unique index `(order_id) WHERE is_current` keeps "one current version" true and makes
-the web app's reads fast.
+A partial unique index `(order_id) WHERE _is_current` keeps "one current version" true and makes
+the web app's reads fast. Platform-added columns start with `_`; source columns keep their names.
+
+The DDL is `postgres/schema.sql`, applied (idempotently) by the one-shot `postgres-setup` job on
+every `up`. Besides the rule above it enforces: `PRIMARY KEY (<key>, _lsn)` (re-applying an event
+fails instead of duplicating a version), `CHECK ((_valid_to IS NULL) = _is_current)`, and
+`_valid_to >= _valid_from`. Source strings are `text` and source columns are nullable, with no
+CHECKs or foreign keys: silver mirrors the source and must not fail when it widens a column or
+when an order lands before its user (§6.2).
+
+Run state lives in `config.etl_checkpoint`, one row per `(pipeline, table_name)`:
+`last_snapshot_id` for the silver step (the bronze snapshot to read after; `NULL` = full read —
+snapshot IDs are random, so the incremental read walks the parent chain instead of comparing
+them), `last_watermark` for ES sync, plus `source_table`, `key_columns` and `is_active`.
 
 ### 6.4. Bronze → silver job
 
 Each run of `job_silver.py`, per table:
 
 1. Read only new bronze data: an Iceberg incremental read (`start-snapshot-id`, exclusive, to
-   the table's current snapshot) from the last applied snapshot ID in `silver.etl_checkpoint`.
+   the table's current snapshot) from the last applied snapshot ID in `config.etl_checkpoint`.
    On the first run there is no checkpoint, so it reads the whole table. Bronze is append-only,
    which is what incremental reads support.
-2. Turn events into version rows: `after` for `c`/`u`/`r`, `before` + `is_deleted = true` for
-   `d`; keep only the last event per key per transaction (§6.2). Within the batch, `valid_to` =
-   the next version's `valid_from` for the same key (window `lead` ordered by `source.lsn`); the
-   last version per key is `is_current`.
+2. Turn events into version rows: `after` for `c`/`u`/`r`, `before` + `_is_deleted = true` for
+   `d`; keep only the last event per key per transaction (§6.2). Within the batch, `_valid_to` =
+   the next version's `_valid_from` for the same key (window `lead` ordered by `source.lsn`); the
+   last version per key is `_is_current`.
 3. Write `staging.<table>` over JDBC with `mode=overwrite` (the table is recreated each run, so
    it picks up new source columns), plus one row in `staging.batch` with the table name and the
    snapshot ID it read up to.
 4. Hand over to Airflow (`silver_apply`), which in **one Postgres transaction**: adds any staging
    column missing from silver (`ALTER TABLE ... ADD COLUMN`), applies the SCD2 statements below,
-   and copies the snapshot ID from `staging.batch` into `silver.etl_checkpoint`. If anything
+   and copies the snapshot ID from `staging.batch` into `config.etl_checkpoint`. If anything
    fails, nothing moves, and the next run reads the same range again.
 
 The SCD2 apply is two statements, because `MERGE` can do only one action per matched source row
@@ -470,16 +482,16 @@ while SCD2 needs both "close the old version" and "insert the new one":
 --    Staging may also hold already-applied events (re-runs, Debezium duplicates); comparing
 --    only min(_lsn) of the whole batch would miss the close and leave two current versions.
 WITH nxt AS (
-  SELECT DISTINCT ON (st.order_id) st.order_id, st.valid_from
+  SELECT DISTINCT ON (st.order_id) st.order_id, st._valid_from
   FROM staging.orders st
-  JOIN silver.orders s ON s.order_id = st.order_id AND s.is_current
+  JOIN silver.orders s ON s.order_id = st.order_id AND s._is_current
   WHERE st._lsn > s._lsn
   ORDER BY st.order_id, st._lsn
 )
 UPDATE silver.orders s
-SET valid_to = nxt.valid_from, is_current = false, _silver_updated_at = now()
+SET _valid_to = nxt._valid_from, _is_current = false, _silver_updated_at = now()
 FROM nxt
-WHERE s.order_id = nxt.order_id AND s.is_current;
+WHERE s.order_id = nxt.order_id AND s._is_current;
 
 -- 2) insert versions not applied yet (skip anything already seen -> idempotent)
 INSERT INTO silver.orders (<columns from staging>, _silver_updated_at)
@@ -500,8 +512,8 @@ and bulk-upserts with `_id` = `order_id`.
 
 Which orders to rebuild: every order whose own row, any of its lines, **or its user** has
 `_silver_updated_at` > the last sync watermark — a user changing city must refresh all of that
-user's order documents. Orders whose current version `is_deleted` are deleted from the index.
-The watermark is the max `_silver_updated_at` processed, stored in `silver.etl_checkpoint`.
+user's order documents. Orders whose current version `_is_deleted` are deleted from the index.
+The watermark is the max `_silver_updated_at` processed, stored in `config.etl_checkpoint`.
 To change the document shape, just recreate the index (demo — no alias switching).
 
 ## 8. Gold — ClickHouse
@@ -513,10 +525,10 @@ ClickHouse named collection). Gold models are `incremental` on `ReplacingMergeTr
 ```sql
 -- models/gold/fct_orders.sql
 {{ config(materialized='incremental', incremental_strategy='append',
-          engine='ReplacingMergeTree(_silver_updated_at, is_deleted)',
+          engine='ReplacingMergeTree(_silver_updated_at, _is_deleted)',
           order_by='order_id') }}
-select ..., toUInt8(is_deleted) as is_deleted, _silver_updated_at
-from {{ ref('stg_orders') }}            -- current versions only (is_current)
+select ..., toUInt8(_is_deleted) as _is_deleted, _silver_updated_at
+from {{ ref('stg_orders') }}            -- current versions only (_is_current)
 {% if is_incremental() %}
 where _silver_updated_at > {{ get_watermark(this) }}
 {% endif %}
@@ -525,17 +537,17 @@ where _silver_updated_at > {{ get_watermark(this) }}
 - `append` + `ReplacingMergeTree`: new versions of an order are just appended, and the engine
   keeps the row with the highest `_silver_updated_at` per `order_id`. dbt-clickhouse's default
   incremental strategy would instead rebuild the table through a temp copy on every run.
-- `is_deleted` as the engine's second parameter makes `FINAL` hide orders deleted at the source.
+- `_is_deleted` as the engine's second parameter makes `FINAL` hide orders deleted at the source.
 - `ReplacingMergeTree` drops old rows only during background merges, so queries use `FINAL`.
 - The watermark is fetched first by a macro (`run_query` on `max(_silver_updated_at)`, with a
   `1970-01-01` fallback for an empty table) and inlined as a constant, so ClickHouse can push the
   filter down to Postgres.
 - It must be `_silver_updated_at`, not the source `updated_at`: closing an SCD2 version changes
-  only `valid_to`, which the source timestamp doesn't reflect.
+  only `_valid_to`, which the source timestamp doesn't reflect.
 
 Models: `dim_users`, `dim_date`, `fct_orders`, `fct_order_lines` for Superset to aggregate, plus
-a few marts (revenue per day, per city). Dimensions come from SCD2: `is_current` for today's
-state, or a `valid_from`/`valid_to` range join for point-in-time reports.
+a few marts (revenue per day, per city). Dimensions come from SCD2: `_is_current` for today's
+state, or a `_valid_from`/`_valid_to` range join for point-in-time reports.
 
 ## 9. API, web page and Airflow
 
@@ -558,12 +570,12 @@ Bronze is not an Airflow step: the Iceberg sink writes it continuously.
 - Iceberg compaction / expire snapshots / remove orphan files on bronze (Spark procedures;
   `remove_orphan_files` needs `prefix_listing => true` — otherwise it lists files through Hadoop,
   which has no `s3://` filesystem here, only `s3a://`).
-  **Never expire the snapshot stored in `silver.etl_checkpoint`** (or anything newer): the next
+  **Never expire the snapshot stored in `config.etl_checkpoint`** (or anything newer): the next
   incremental read starts from it and fails if it is gone. Expire only snapshots older than the
   checkpoint.
 - Source-vs-silver row-count check: stop the generator, wait for the pipeline to drain, run the
-  silver DAG, then compare `count(*)` at the source with the count of `is_current AND NOT
-  is_deleted` rows in silver.
+  silver DAG, then compare `count(*)` at the source with the count of `_is_current AND NOT
+  _is_deleted` rows in silver.
 - Replication slot lag on `source-db`:
   `SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) FROM pg_replication_slots;`
 

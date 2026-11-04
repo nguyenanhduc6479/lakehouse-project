@@ -423,11 +423,11 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 
 **Goal:** a history-keeping (SCD Type 2) copy of the source in Postgres `data-platform`.
 
-- [ ] DDL in `data-platform`: schemas `silver` and `staging`, tables `silver.users` /
+- [x] DDL in `data-platform` (`postgres/schema.sql`, applied by `postgres-setup`; `staging` still to come): schemas `silver` and `staging`, tables `silver.users` /
   `silver.orders` / `silver.order_details` (design §6.3), partial unique index
-  `(<key>) WHERE is_current`, table `silver.etl_checkpoint`.
+  `(<key>) WHERE _is_current`, table `config.etl_checkpoint`.
 - [ ] `spark/jobs/job_silver.py`: incremental read from the checkpoint snapshot, events →
-  versions (last event per key per transaction, `lead` for `valid_to`), write
+  versions (last event per key per transaction, `lead` for `_valid_to`), write
   `staging.<table>` + `staging.batch`. Transform logic in pure functions with pytest tests.
 - [ ] Postgres credentials for the Spark services (JDBC to `data-platform`); Airflow already has
   `postgres_conn` pointing at `data-platform`, so no new connection is needed.
@@ -437,9 +437,9 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 
 **Done when:**
 - Triggering the DAG fills `silver.*`; one order shows several versions with consistent
-  `valid_from` / `valid_to` and exactly one `is_current`.
+  `_valid_from` / `_valid_to` and exactly one `_is_current`.
 - Triggering it again with no new events changes nothing (idempotent).
-- A deleted order ends with an `is_deleted = true` current version.
+- A deleted order ends with an `_is_deleted = true` current version.
 - Spark transform tests pass in the `spark-master` container.
 
 **Inputs from phase 4** (check while building):
@@ -461,7 +461,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   Airflow 2.9.2 constraints); create `dbt/profiles.yml` (removed with dbt-spark) and fill
   `dbt/dbt_project.yml`.
 - [ ] Models (design §8): ephemeral staging over `postgresql()`; `dim_users`, `dim_date`,
-  `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, is_deleted)`);
+  `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, _is_deleted)`);
   marts for revenue per day and per city; `get_watermark` macro; dbt tests.
 - [ ] Add `dbt run` + `dbt test` to `platform_pipeline` after `silver_apply`.
 - [ ] Superset service (image + `clickhouse-connect`), ClickHouse database connection, one
@@ -477,7 +477,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 **Goal:** a web page that searches orders and shows their history and statistics.
 
 - [ ] Task `sync_es` in `platform_pipeline` (parallel with dbt): build one document per order,
-  rebuild orders whose row, lines or user changed, delete orders that became `is_deleted`;
+  rebuild orders whose row, lines or user changed, delete orders that became `_is_deleted`;
   `elasticsearch` client 7.x.
 - [ ] FastAPI service: `GET /search?q=` (ES), `GET /orders/{id}` and `/orders/{id}/history`
   (silver), `GET /stats/...` (gold).

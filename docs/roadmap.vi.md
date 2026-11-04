@@ -424,11 +424,11 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 
 **Mục tiêu:** bản sao có lịch sử (SCD Type 2) của nguồn trong Postgres `data-platform`.
 
-- [ ] DDL trong `data-platform`: schema `silver` và `staging`, các bảng `silver.users` /
+- [x] DDL trong `data-platform` (`postgres/schema.sql`, do `postgres-setup` chạy; `staging` làm sau): schema `silver` và `staging`, các bảng `silver.users` /
   `silver.orders` / `silver.order_details` (design §6.3), partial unique index
-  `(<key>) WHERE is_current`, bảng `silver.etl_checkpoint`.
+  `(<key>) WHERE _is_current`, bảng `config.etl_checkpoint`.
 - [ ] `spark/jobs/job_silver.py`: đọc incremental từ snapshot trong checkpoint, chuyển event thành
-  phiên bản (mỗi khóa chỉ lấy event cuối trong một transaction, dùng `lead` để tính `valid_to`), ghi
+  phiên bản (mỗi khóa chỉ lấy event cuối trong một transaction, dùng `lead` để tính `_valid_to`), ghi
   `staging.<table>` + `staging.batch`. Logic transform viết thành hàm thuần, có test pytest.
 - [ ] Credential Postgres cho các service Spark (JDBC tới `data-platform`); Airflow đã có sẵn
   `postgres_conn` trỏ tới `data-platform`, nên không cần thêm connection mới.
@@ -437,10 +437,10 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 - [ ] DAG `platform_pipeline` (`schedule=None`): `silver_spark` → `silver_apply`.
 
 **Hoàn thành khi:**
-- Trigger DAG thì `silver.*` có dữ liệu; một đơn hàng có nhiều phiên bản với `valid_from` /
-  `valid_to` khớp nhau và đúng một bản `is_current`.
+- Trigger DAG thì `silver.*` có dữ liệu; một đơn hàng có nhiều phiên bản với `_valid_from` /
+  `_valid_to` khớp nhau và đúng một bản `_is_current`.
 - Trigger lại khi không có event mới thì không có gì thay đổi (idempotent).
-- Đơn hàng bị xóa kết thúc bằng một phiên bản hiện hành có `is_deleted = true`.
+- Đơn hàng bị xóa kết thúc bằng một phiên bản hiện hành có `_is_deleted = true`.
 - Test Spark transform chạy qua trong container `spark-master`.
 
 **Lưu ý đầu vào từ phase 4** (kiểm tra khi làm):
@@ -462,7 +462,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   của Airflow 2.9.2); tạo `dbt/profiles.yml` (đã bị xóa cùng dbt-spark) và viết nội dung cho
   `dbt/dbt_project.yml`.
 - [ ] Model (design §8): staging ephemeral đọc qua `postgresql()`; `dim_users`, `dim_date`,
-  `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, is_deleted)`);
+  `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, _is_deleted)`);
   mart doanh thu theo ngày và theo thành phố; macro `get_watermark`; dbt test.
 - [ ] Thêm `dbt run` + `dbt test` vào `platform_pipeline`, chạy sau `silver_apply`.
 - [ ] Service Superset (image + `clickhouse-connect`), kết nối tới ClickHouse, một dashboard.
@@ -478,7 +478,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
 
 - [ ] Task `sync_es` trong `platform_pipeline` (chạy song song với dbt): mỗi đơn hàng là một
   document; dựng lại các đơn có chính nó, dòng chi tiết hoặc user thay đổi; xóa các đơn đã
-  `is_deleted`; client `elasticsearch` bản 7.x.
+  `_is_deleted`; client `elasticsearch` bản 7.x.
 - [ ] Service FastAPI: `GET /search?q=` (ES), `GET /orders/{id}` và `/orders/{id}/history`
   (silver), `GET /stats/...` (gold).
 - [ ] Một trang HTML tĩnh do API phục vụ.

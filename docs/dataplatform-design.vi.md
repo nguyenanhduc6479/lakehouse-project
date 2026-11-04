@@ -419,13 +419,13 @@ xác nhận; Postgres giữ toàn bộ WAL sau đó, nên Debezium bị dừng s
 - **Một version cho mỗi key trong mỗi transaction.** Generator insert một đơn hàng rồi update
   `total_amount` của nó trong cùng transaction: hai event, cùng key, cùng thời điểm commit. Chỉ
   event cuối của một key trong một transaction (`source.txId`) trở thành version; nếu không silver
-  sẽ có version độ dài bằng 0 (`valid_from = valid_to`).
+  sẽ có version độ dài bằng 0 (`_valid_from = _valid_to`).
 - **Nhất quán sau cùng giữa các bảng.** Mỗi bảng được xử lý riêng. Ba topic di chuyển độc lập, nên
   tại một thời điểm bronze có thể có một đơn hàng mà các dòng chi tiết chưa tới; silver có thể tạm
   hiển thị nó không có dòng nào. Lần chạy kế tiếp lấp chỗ trống. Điều này được chấp nhận cho demo.
   (Nhất quán chặt theo từng transaction sẽ cần `provide.transaction.metadata` của Debezium và chỉ
   apply những transaction đã đủ số event — có thể làm bài tập sau.)
-- Delete trở thành version cuối với `is_deleted = true` (giá trị lấy từ `before`).
+- Delete trở thành version cuối với `_is_deleted = true` (giá trị lấy từ `before`).
 
 ### 6.3. Các bảng silver
 
@@ -434,14 +434,26 @@ Database `data-platform`, schema `silver`, mỗi bảng nguồn một bảng, v�
 | Cột | Ý nghĩa |
 |---|---|
 | các cột nguồn | `order_id`, `user_id`, `status`, … |
-| `valid_from`, `valid_to` | Khoảng hiệu lực của version, lấy từ `source.ts_ms` (thời điểm commit của transaction nguồn); `valid_to` null với version hiện tại |
-| `is_current` | Đúng một version hiện tại cho mỗi key |
-| `is_deleted` | Key đã bị xóa ở nguồn |
+| `_valid_from`, `_valid_to` | Khoảng hiệu lực của version, lấy từ `source.ts_ms` (thời điểm commit của transaction nguồn); `_valid_to` null với version hiện tại |
+| `_is_current` | Đúng một version hiện tại cho mỗi key |
+| `_is_deleted` | Key đã bị xóa ở nguồn |
 | `_lsn` | LSN của event sinh ra version này |
 | `_silver_updated_at` | Lần cuối silver ghi dòng này — watermark cho gold và ES (§7, §8) |
 
-Một partial unique index `(order_id) WHERE is_current` đảm bảo "một version hiện tại" luôn đúng và
-giúp các truy vấn đọc của web app nhanh.
+Một partial unique index `(order_id) WHERE _is_current` đảm bảo "một version hiện tại" luôn đúng và
+giúp các truy vấn đọc của web app nhanh. Cột do platform thêm vào bắt đầu bằng `_`; cột nguồn giữ
+nguyên tên.
+
+DDL nằm ở `postgres/schema.sql`, được job one-shot `postgres-setup` chạy (idempotent) mỗi lần `up`.
+Ngoài ràng buộc trên còn có: `PRIMARY KEY (<key>, _lsn)` (áp lại một event sẽ lỗi thay vì tạo
+version trùng), `CHECK ((_valid_to IS NULL) = _is_current)` và `_valid_to >= _valid_from`. Chuỗi
+nguồn là `text`, cột nguồn cho phép null, không có CHECK hay foreign key: silver phản chiếu nguồn
+và không được lỗi khi nguồn nới rộng một cột hoặc khi đơn hàng đến trước user của nó (§6.2).
+
+Trạng thái chạy nằm trong `config.etl_checkpoint`, mỗi `(pipeline, table_name)` một dòng:
+`last_snapshot_id` cho bước silver (snapshot bronze để đọc tiếp sau nó; `NULL` = đọc toàn bộ —
+snapshot ID là số ngẫu nhiên, nên đọc incremental đi theo chuỗi parent chứ không so sánh ID),
+`last_watermark` cho ES sync, cùng `source_table`, `key_columns` và `is_active`.
 
 ### 6.4. Job bronze → silver
 
@@ -449,17 +461,17 @@ Mỗi lần chạy `job_silver.py`, cho từng bảng:
 
 1. Chỉ đọc dữ liệu bronze mới: một Iceberg incremental read (`start-snapshot-id`, không bao gồm,
    tới snapshot hiện tại của bảng) bắt đầu từ snapshot ID đã apply cuối cùng trong
-   `silver.etl_checkpoint`. Lần chạy đầu chưa có checkpoint, nên đọc toàn bộ bảng. Bronze là
+   `config.etl_checkpoint`. Lần chạy đầu chưa có checkpoint, nên đọc toàn bộ bảng. Bronze là
    append-only, đúng thứ incremental read hỗ trợ.
-2. Biến event thành các dòng version: `after` cho `c`/`u`/`r`, `before` + `is_deleted = true` cho
-   `d`; chỉ giữ event cuối của mỗi key trong mỗi transaction (§6.2). Trong batch, `valid_to` =
-   `valid_from` của version kế tiếp cùng key (window `lead` sắp theo `source.lsn`); version cuối
-   của mỗi key là `is_current`.
+2. Biến event thành các dòng version: `after` cho `c`/`u`/`r`, `before` + `_is_deleted = true` cho
+   `d`; chỉ giữ event cuối của mỗi key trong mỗi transaction (§6.2). Trong batch, `_valid_to` =
+   `_valid_from` của version kế tiếp cùng key (window `lead` sắp theo `source.lsn`); version cuối
+   của mỗi key là `_is_current`.
 3. Ghi `staging.<table>` qua JDBC với `mode=overwrite` (bảng được tạo lại mỗi lần chạy, nên nhận
    được cột nguồn mới), cộng một dòng trong `staging.batch` với tên bảng và snapshot ID đã đọc tới.
 4. Bàn giao cho Airflow (`silver_apply`), trong **một transaction Postgres**: thêm các cột staging
    còn thiếu vào silver (`ALTER TABLE ... ADD COLUMN`), chạy các câu lệnh SCD2 bên dưới, và chép
-   snapshot ID từ `staging.batch` sang `silver.etl_checkpoint`. Nếu có gì lỗi, không gì thay đổi,
+   snapshot ID từ `staging.batch` sang `config.etl_checkpoint`. Nếu có gì lỗi, không gì thay đổi,
    và lần chạy sau đọc lại đúng khoảng đó.
 
 Bước apply SCD2 gồm hai câu lệnh, vì `MERGE` chỉ làm được một hành động cho mỗi dòng nguồn khớp,
@@ -470,16 +482,16 @@ trong khi SCD2 cần cả "đóng version cũ" lẫn "chèn version mới":
 --    Staging may also hold already-applied events (re-runs, Debezium duplicates); comparing
 --    only min(_lsn) of the whole batch would miss the close and leave two current versions.
 WITH nxt AS (
-  SELECT DISTINCT ON (st.order_id) st.order_id, st.valid_from
+  SELECT DISTINCT ON (st.order_id) st.order_id, st._valid_from
   FROM staging.orders st
-  JOIN silver.orders s ON s.order_id = st.order_id AND s.is_current
+  JOIN silver.orders s ON s.order_id = st.order_id AND s._is_current
   WHERE st._lsn > s._lsn
   ORDER BY st.order_id, st._lsn
 )
 UPDATE silver.orders s
-SET valid_to = nxt.valid_from, is_current = false, _silver_updated_at = now()
+SET _valid_to = nxt._valid_from, _is_current = false, _silver_updated_at = now()
 FROM nxt
-WHERE s.order_id = nxt.order_id AND s.is_current;
+WHERE s.order_id = nxt.order_id AND s._is_current;
 
 -- 2) insert versions not applied yet (skip anything already seen -> idempotent)
 INSERT INTO silver.orders (<columns from staging>, _silver_updated_at)
@@ -505,8 +517,8 @@ và thành phố của user + tên sản phẩm của các dòng — ES không c
 
 Đơn hàng nào cần dựng lại: mọi đơn hàng mà chính dòng của nó, bất kỳ dòng chi tiết nào, **hoặc user
 của nó** có `_silver_updated_at` > watermark của lần sync trước — một user đổi thành phố phải làm
-mới mọi document đơn hàng của user đó. Đơn hàng có version hiện tại `is_deleted` bị xóa khỏi index.
-Watermark là `_silver_updated_at` lớn nhất đã xử lý, lưu trong `silver.etl_checkpoint`. Muốn đổi
+mới mọi document đơn hàng của user đó. Đơn hàng có version hiện tại `_is_deleted` bị xóa khỏi index.
+Watermark là `_silver_updated_at` lớn nhất đã xử lý, lưu trong `config.etl_checkpoint`. Muốn đổi
 cấu trúc document thì cứ tạo lại index (demo — không chuyển alias).
 
 ## 8. Gold — ClickHouse
@@ -518,10 +530,10 @@ ClickHouse named collection). Các gold model là `incremental` trên `Replacing
 ```sql
 -- models/gold/fct_orders.sql
 {{ config(materialized='incremental', incremental_strategy='append',
-          engine='ReplacingMergeTree(_silver_updated_at, is_deleted)',
+          engine='ReplacingMergeTree(_silver_updated_at, _is_deleted)',
           order_by='order_id') }}
-select ..., toUInt8(is_deleted) as is_deleted, _silver_updated_at
-from {{ ref('stg_orders') }}            -- current versions only (is_current)
+select ..., toUInt8(_is_deleted) as _is_deleted, _silver_updated_at
+from {{ ref('stg_orders') }}            -- current versions only (_is_current)
 {% if is_incremental() %}
 where _silver_updated_at > {{ get_watermark(this) }}
 {% endif %}
@@ -530,17 +542,17 @@ where _silver_updated_at > {{ get_watermark(this) }}
 - `append` + `ReplacingMergeTree`: version mới của một đơn hàng chỉ việc được ghi thêm, và engine
   giữ dòng có `_silver_updated_at` cao nhất cho mỗi `order_id`. Chiến lược incremental mặc định của
   dbt-clickhouse thì lại dựng lại bảng qua một bản sao tạm ở mỗi lần chạy.
-- `is_deleted` là tham số thứ hai của engine, giúp `FINAL` ẩn các đơn hàng đã bị xóa ở nguồn.
+- `_is_deleted` là tham số thứ hai của engine, giúp `FINAL` ẩn các đơn hàng đã bị xóa ở nguồn.
 - `ReplacingMergeTree` chỉ bỏ dòng cũ trong lúc background merge, nên truy vấn phải dùng `FINAL`.
 - Watermark được lấy trước bởi một macro (`run_query` trên `max(_silver_updated_at)`, với giá trị
   dự phòng `1970-01-01` cho bảng rỗng) và chèn vào như một hằng số, để ClickHouse đẩy được bộ lọc
   xuống Postgres.
 - Phải là `_silver_updated_at`, không phải `updated_at` của nguồn: việc đóng một version SCD2 chỉ
-  đổi `valid_to`, điều mà timestamp nguồn không phản ánh.
+  đổi `_valid_to`, điều mà timestamp nguồn không phản ánh.
 
 Model: `dim_users`, `dim_date`, `fct_orders`, `fct_order_lines` để Superset tổng hợp, cộng vài mart
-(doanh thu theo ngày, theo thành phố). Dimension lấy từ SCD2: `is_current` cho trạng thái hôm nay,
-hoặc join theo khoảng `valid_from`/`valid_to` cho báo cáo tại một thời điểm.
+(doanh thu theo ngày, theo thành phố). Dimension lấy từ SCD2: `_is_current` cho trạng thái hôm nay,
+hoặc join theo khoảng `_valid_from`/`_valid_to` cho báo cáo tại một thời điểm.
 
 ## 9. API, trang web và Airflow
 
@@ -562,11 +574,11 @@ Bronze không phải là một bước Airflow: Iceberg sink ghi nó liên tục
 - Iceberg compaction / expire snapshot / xóa orphan file trên bronze (Spark procedure;
   `remove_orphan_files` cần `prefix_listing => true` — nếu không nó liệt kê file qua Hadoop, mà ở
   đây Hadoop không có filesystem `s3://`, chỉ có `s3a://`).
-  **Không bao giờ expire snapshot đang lưu trong `silver.etl_checkpoint`** (hoặc bất kỳ snapshot nào
+  **Không bao giờ expire snapshot đang lưu trong `config.etl_checkpoint`** (hoặc bất kỳ snapshot nào
   mới hơn): lần incremental read kế tiếp bắt đầu từ đó và sẽ fail nếu nó mất. Chỉ expire những
   snapshot cũ hơn checkpoint.
 - Kiểm tra số dòng nguồn so với silver: dừng generator, chờ pipeline xử lý hết, chạy DAG silver,
-  rồi so `count(*)` ở nguồn với số dòng `is_current AND NOT is_deleted` trong silver.
+  rồi so `count(*)` ở nguồn với số dòng `_is_current AND NOT _is_deleted` trong silver.
 - Độ trễ replication slot trên `source-db`:
   `SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) FROM pg_replication_slots;`
 

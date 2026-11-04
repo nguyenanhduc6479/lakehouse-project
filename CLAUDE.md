@@ -87,7 +87,10 @@ the others by service name. All credentials and tunables live in `.env` and are 
 - **Postgres — two instances**, both on the same `postgres:16` image. `postgres` (`compose/infra.yml`, host 5432) is shared: its
   default DB `data-platform` (`POSTGRES_DB`, created by initdb) holds silver/staging, and a
   one-shot `postgres-setup` runs `postgres/scripts/init.sh` to idempotently create the `airflow`
-  and `polaris` roles/DBs. `source-db` (`compose/source.yml`, host **5433**, DB `source-db`,
+  and `polaris` roles/DBs, then applies **`postgres/schema.sql`** to `data-platform` (schema
+  `config` with `etl_checkpoint`, schema `silver` with the SCD2 tables; design §6.3). SCD2/system
+  columns start with `_` (`_valid_from`, `_valid_to`, `_is_current`, `_is_deleted`, `_lsn`,
+  `_silver_updated_at`). `source-db` (`compose/source.yml`, host **5433**, DB `source-db`,
   `SOURCE_POSTGRES_*` in `.env`) is the CDC source, kept separate because `wal_level=logical` and
   slot WAL retention (`max_slot_wal_keep_size=1GB`) are instance-wide. `POSTGRES_*` only apply when
   a volume is first initialised — after changing them, recreate the volume (`down -v`).

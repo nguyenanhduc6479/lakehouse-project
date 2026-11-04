@@ -87,6 +87,17 @@ else
     echo "warning: missing polaris vars."
 fi
 
+# 3. data-platform DB: config + silver schemas (idempotent DDL)
+echo "applying /postgres/schema.sql to database '$PGDATABASE'..."
+output=$(psql -X -q -v ON_ERROR_STOP=1 -h postgres -f /postgres/schema.sql 2>&1)
+exit_code=$?
+if [ $exit_code -ne 0 ]; then
+    echo "failed to apply /postgres/schema.sql"
+    echo "error details: $output"
+    exit 1
+fi
+echo "  -> schema applied."
+
 echo "-----------------------------------------------------"
 echo "all initialization steps completed successfully!"
 echo "-----------------------------------------------------"
