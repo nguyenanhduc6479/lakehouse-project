@@ -456,7 +456,7 @@ them), `last_watermark` for ES sync, plus `source_table`, `key_columns` and `is_
 
 ### 6.4. Bronze → silver job
 
-Code: `spark/jobs/job_silver.py` (step 1–3) and `airflow/plugins/silver_apply.py` (step 4), run
+Code: `spark/jobs/job_silver.py` (step 1–3) and `airflow/dags/lib/silver_apply.py` (step 4), run
 by DAG `platform_pipeline` (§9). The job is **generic**: it processes every row of
 `config.etl_checkpoint` with `pipeline = 'silver' AND is_active`, using its `source_table` and
 `key_columns`, so a new source table needs a checkpoint row, not code. Each run, per table:

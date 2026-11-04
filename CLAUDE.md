@@ -64,10 +64,12 @@ no HA, replicas, poolers or TLS.
   app-level checks from Airflow, Kafka, Schema Registry, Spark worker); recipe in `docs/services.md`.
 - `spark/jobs/helper.py` (`get_spark`) builds a SparkSession wired to Polaris + RustFS (S3) — reuse it
   for every Spark job; `postgres_jdbc_options()` gives JDBC options for `data-platform` (the Spark
-  services get `POSTGRES_*`). `airflow/plugins/spark_rest.py` (`submit_and_wait`) submits a job
-  via the Spark REST API.
+  services get `POSTGRES_*`). `airflow/dags/lib/spark_rest.py` (`submit_and_wait`) submits a job
+  via the Spark REST API. **Code shared by DAGs lives in `airflow/dags/lib/`** (imported as
+  `lib.<module>`; `airflow/dags/.airflowignore` keeps the DAG processor out of it);
+  `airflow/plugins/` is for real Airflow plugins only (empty).
 - **Silver** (design §6.4): `spark/jobs/job_silver.py` (bronze → `staging.<table>` +
-  `staging.batch`) and `airflow/plugins/silver_apply.py` (staging → silver SCD2 + checkpoint, one
+  `staging.batch`) and `airflow/dags/lib/silver_apply.py` (staging → silver SCD2 + checkpoint, one
   transaction per table) are **generic** — tables and keys come from `config.etl_checkpoint`
   (`pipeline = 'silver'`), so a new table needs DDL + a checkpoint row, no code. DAG
   `airflow/dags/platform_pipeline.py` (`schedule=None`, `max_active_runs=1`). A new DAG file is

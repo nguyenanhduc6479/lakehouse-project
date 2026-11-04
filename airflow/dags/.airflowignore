@@ -1,0 +1,3 @@
+# Paths the DAG processor never parses (regexp, matched against the path relative to this folder).
+# lib/ holds plain Python modules used by the DAGs, not DAG files.
+^lib/

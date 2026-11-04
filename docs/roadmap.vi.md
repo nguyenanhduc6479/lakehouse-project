@@ -437,7 +437,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   đọc toàn bộ); `events_to_versions` (hàm thuần, 6 test Spark) → `staging.<table>` (JDBC
   overwrite, tạo lại mỗi lần chạy); `staging.batch` (start, end, số dòng) được ghi **cuối cùng**.
   `helper.postgres_jdbc_options()`; thêm `POSTGRES_*` cho `spark-master` / `spark-worker`.
-- [x] `airflow/plugins/silver_apply.py` (task `silver_apply`): mỗi bảng một transaction — từ chối
+- [x] `airflow/dags/lib/silver_apply.py` (task `silver_apply`): mỗi bảng một transaction — từ chối
   batch có start ≠ checkpoint, bỏ qua batch đã áp, `ADD COLUMN` cho cột staging mới, đóng + chèn
   (design §6.4) với mọi giá trị được cast sang kiểu của silver, đẩy checkpoint lên. Các bảng áp
   độc lập; task fail ở cuối nếu có bảng lỗi. Phần sinh SQL có test trên host (3 test).

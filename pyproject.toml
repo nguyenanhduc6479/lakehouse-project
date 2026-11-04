@@ -18,10 +18,10 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# Let pytest import the job modules (spark/jobs), Airflow plugins (airflow/plugins) and the data
+# Let pytest import the job modules (spark/jobs), the DAGs' shared code (airflow/dags, imported as `lib.<module>`) and the data
 # generator (source/generator.py) directly
 # without installing them as a package.
-pythonpath = ["spark/jobs", "airflow/plugins", "source"]
+pythonpath = ["spark/jobs", "airflow/dags", "source"]
 testpaths = ["tests"]
 # Marker 'spark' = test needs a SparkSession/JVM. On a Windows host (python workers often hit
 # "Accept timed out") run the rest with:  uv run pytest -m "not spark"

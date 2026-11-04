@@ -5,7 +5,7 @@ since the tests only check pure transform LOGIC on hand-built in-memory DataFram
 
 Running the tests needs pyspark==3.5.1 + Java (JDK 8/11/17). Simplest: run inside the
 custom-spark container (`docker compose exec spark-master python -m pytest /opt/...`) or on
-a machine with Java. The `pythonpath` to spark/jobs & airflow/plugins is set in pyproject.toml.
+a machine with Java. The `pythonpath` to spark/jobs & airflow/dags is set in pyproject.toml.
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
-"""SQL built by airflow/plugins/silver_apply.py (no database needed)."""
+"""SQL built by airflow/dags/lib/silver_apply.py (no database needed)."""
 
 from __future__ import annotations
 
-from silver_apply import build_scd2_sql, quote_ident, quote_table, staging_table_of
+from lib.silver_apply import build_scd2_sql, quote_ident, quote_table, staging_table_of
 
 
 def test_quoting():

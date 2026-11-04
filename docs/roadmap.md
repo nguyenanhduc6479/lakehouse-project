@@ -436,7 +436,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   when NULL); `events_to_versions` (pure function, 6 Spark tests) → `staging.<table>` (JDBC
   overwrite, recreated each run); `staging.batch` (start, end, row count) is written **last**.
   `helper.postgres_jdbc_options()`; `POSTGRES_*` added to `spark-master` / `spark-worker`.
-- [x] `airflow/plugins/silver_apply.py` (task `silver_apply`): per table, one transaction —
+- [x] `airflow/dags/lib/silver_apply.py` (task `silver_apply`): per table, one transaction —
   refuse a batch whose start ≠ checkpoint, skip one already applied, `ADD COLUMN` for new staging
   columns, close + insert (design §6.4) with every value cast to the silver type, advance the
   checkpoint. Tables are applied independently; the task fails at the end if any failed. SQL

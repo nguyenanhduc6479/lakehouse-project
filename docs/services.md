@@ -57,7 +57,7 @@ Created by `airflow/scripts/init.sh` (run by `airflow-init`) from `.env`, never 
 
 | Connection | Type | Points at | Notes |
 |---|---|---|---|
-| `spark_rest_conn` | HTTP | `spark-master:6066` | Cluster-mode submit via `airflow/plugins/spark_rest.py` |
+| `spark_rest_conn` | HTTP | `spark-master:6066` | Cluster-mode submit via `airflow/dags/lib/spark_rest.py` |
 | `s3_conn` | AWS | `http://rustfs:9000` | `S3_ACCESS_KEY` / `S3_SECRET_KEY`, region `S3_REGION` |
 | `postgres_conn` | Postgres | `postgres:5432/data-platform` | Silver/staging database |
 | `trino_conn` | Trino | `trino:8080`, catalog `lakehouse` | User `airflow`, no password (Trino rejects requests without a user) |

@@ -8,8 +8,8 @@ For every active `pipeline = 'silver'` row of `config.etl_checkpoint`:
    columns show up there).
 Finally `staging.batch` is refilled with one row per table: the snapshot range staging holds.
 
-The job never touches silver or the checkpoint: Airflow's `silver_apply` (airflow/plugins/
-silver_apply.py) applies staging and advances the checkpoint in one Postgres transaction, so a
+The job never touches silver or the checkpoint: Airflow's `silver_apply` (airflow/dags/
+lib/silver_apply.py) applies staging and advances the checkpoint in one Postgres transaction, so a
 failure anywhere leaves the checkpoint where it was and the next run re-reads the same range.
 
 Generic: the tables and their keys come from `config.etl_checkpoint` (`source_table`,

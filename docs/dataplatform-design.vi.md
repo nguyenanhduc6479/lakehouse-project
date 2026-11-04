@@ -457,7 +457,7 @@ snapshot ID là số ngẫu nhiên, nên đọc incremental đi theo chuỗi par
 
 ### 6.4. Job bronze → silver
 
-Code: `spark/jobs/job_silver.py` (bước 1–3) và `airflow/plugins/silver_apply.py` (bước 4), do
+Code: `spark/jobs/job_silver.py` (bước 1–3) và `airflow/dags/lib/silver_apply.py` (bước 4), do
 DAG `platform_pipeline` chạy (§9). Job **dùng chung**: nó xử lý mọi dòng của
 `config.etl_checkpoint` có `pipeline = 'silver' AND is_active`, dùng `source_table` và
 `key_columns` của dòng đó, nên thêm bảng nguồn mới chỉ cần thêm một dòng checkpoint, không cần
