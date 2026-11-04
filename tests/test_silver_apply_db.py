@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 
 import pytest
-from lib.silver_apply import apply_table
+from lib.silver_apply import apply_all, apply_table
 
 psycopg = pytest.importorskip("psycopg")
 
@@ -236,3 +236,11 @@ def test_new_staging_column_is_added_to_silver(conn):
     assert conn.execute("SELECT coupon FROM silver.orders").fetchone() == ("X",)
     conn.execute("ALTER TABLE silver.orders DROP COLUMN coupon")
     conn.commit()
+
+
+def test_apply_all_for_one_table(conn):
+    stage(conn, [row(1, "pending", 100, 6, T(0))], None, 1)
+    apply_all(conn, "silver.orders")
+    assert checkpoint(conn) == 1
+    with pytest.raises(ValueError, match="silver.nope is not an active silver table"):
+        apply_all(conn, "silver.nope")

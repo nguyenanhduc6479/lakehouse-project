@@ -429,7 +429,8 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   `is_active`); schema `silver` with `users` / `orders` / `order_details` (design §6.3) —
   `PRIMARY KEY (<key>, _lsn)`, partial unique index `(<key>) WHERE _is_current`,
   `CHECK ((_valid_to IS NULL) = _is_current)`, source strings as `text`, no FKs/CHECKs on source
-  columns; schema `staging` with `staging.batch`. SCD2/system columns start with `_`.
+  columns, `_tx_id` (source transaction, added by the review fix below); schema `staging` with
+  `staging.batch`. SCD2/system columns start with `_`.
 - [x] `spark/jobs/job_silver.py`, **generic**: the tables and keys come from
   `config.etl_checkpoint`. Per table: current snapshot from `<table>.refs` (`main`); no new
   snapshot = no-op; otherwise an Iceberg incremental read `(last_snapshot_id, current]` (full read
@@ -438,9 +439,12 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   `helper.postgres_jdbc_options()`; `POSTGRES_*` added to `spark-master` / `spark-worker`.
 - [x] `airflow/dags/lib/silver_apply.py` (task `silver_apply`): per table, one transaction —
   refuse a batch whose start ≠ checkpoint, skip one already applied, `ADD COLUMN` for new staging
-  columns, close + insert (design §6.4) with every value cast to the silver type, advance the
-  checkpoint. Tables are applied independently; the task fails at the end if any failed. SQL
-  builder tested on the host (3 tests).
+  columns, then supersede (a version whose transaction continues in staging) + close + insert
+  (design §6.4) with every value cast to the silver type, advance the checkpoint. Tables are
+  applied independently; the task fails at the end if any failed. Tests: SQL builder on the host
+  (3), the apply itself on a scratch Postgres DB (9, marker `postgres`). Shared DAG code lives in
+  `airflow/dags/lib/` (moved from `airflow/plugins/`; `airflow/dags/.airflowignore` keeps the DAG
+  processor out of it).
 - [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply`, `schedule=None`,
   `max_active_runs=1`.
 - [x] Verified 2026-11-04 (DAG runs on the live stack):
@@ -516,6 +520,13 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   in silver, `numeric(18,2)` becomes `numeric(38,2)`; mapping types from the Avro schema is the
   fix if it matters. Added to the phase 8 scenarios with: silver after bronze compaction, and
   re-snapshot while the generator runs (the `_valid_to >= _valid_from` CHECK may fail).
+- **DAG param `table`** (2026-11-04): `all` (default) or one table (`users` / `silver.users`).
+  `submit_and_wait(app_args=)` passes `--table` to `job_silver.py` through the REST `appArgs`;
+  `silver_apply` filters the same way. A malformed name is refused at trigger time (`Param`
+  pattern); an unknown one is checked against `config.etl_checkpoint` before submitting, so it
+  fails in ~1 s with the list of active tables (the Spark job's own check only showed up as
+  `driverState FAILED` in Airflow, ~1 min later). Verified: `users` run touched only users;
+  the following `all` run did the other two; silver still identical to the source.
 - Lesson: **a grouping rule applied per batch is only correct if a batch boundary can't cut the
   group.** Here batches are cut by the sink's commits, which know nothing about source
   transactions — so the rule had to be finished across batches in the apply. Test the boundary,

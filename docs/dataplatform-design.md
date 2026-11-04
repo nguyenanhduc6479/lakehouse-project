@@ -592,9 +592,12 @@ state, or a `_valid_from`/`_valid_to` range join for point-in-time reports.
 gold, never recomputed from ES, so the web page and the dashboards always agree. The web page is
 a single static HTML page served by the API.
 
-**Airflow — DAG `platform_pipeline`, `schedule=None`, triggered by hand:**
+**Airflow — DAG `platform_pipeline`, `schedule=None`, triggered by hand, `max_active_runs=1`.**
+Param `table`: `all` (default) = every active table in `config.etl_checkpoint`, or one table
+(`users` or `silver.users`; validated by a pattern at trigger time and against the checkpoint
+table before anything is submitted).
 
-1. `silver_spark` — submit `job_silver.py` via Spark REST 6066.
+1. `silver_spark` — submit `job_silver.py --table <table>` via Spark REST 6066 (`appArgs`).
 2. `silver_apply` — run the SCD2 SQL (§6.4) on Postgres through `postgres_conn` and advance the
    checkpoint.
 3. In parallel: `sync_es` and `dbt run` + `dbt test` on ClickHouse.

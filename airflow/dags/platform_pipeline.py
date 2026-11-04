@@ -4,6 +4,10 @@ silver_spark: submit spark/jobs/job_silver.py (bronze -> staging) through the Sp
 silver_apply: apply staging to silver as SCD2 and advance the checkpoints (Postgres, one
 transaction per table) — airflow/dags/lib/silver_apply.py.
 
+Param `table`: `all` (default) = every active table in config.etl_checkpoint; or one table,
+`users` / `silver.users`. From the CLI:
+    airflow dags trigger platform_pipeline -c '{"table": "users"}'
+
 Later phases add ES sync and dbt after silver_apply.
 """
 
@@ -11,6 +15,7 @@ from __future__ import annotations
 
 import pendulum
 from airflow.decorators import dag, task
+from airflow.models.param import Param
 
 
 @dag(
@@ -20,27 +25,45 @@ from airflow.decorators import dag, task
     catchup=False,
     # two runs at once would race on staging and the checkpoints
     max_active_runs=1,
+    params={
+        "table": Param(
+            "all",
+            type="string",
+            pattern=r"^(all|(silver\.)?[a-z_][a-z0-9_]*)$",
+            description="'all' = every active table in config.etl_checkpoint, "
+            "or one table: users / silver.users",
+        )
+    },
     tags=["silver"],
 )
 def platform_pipeline():
     @task
-    def silver_spark() -> None:
+    def silver_spark(table: str) -> None:
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+        from lib.silver_apply import active_tables, resolve_table
         from lib.spark_rest import submit_and_wait
 
-        submit_and_wait("job_silver.py")
+        table = resolve_table(table)
+        # fail here with a readable error instead of a FAILED Spark driver a minute later
+        conn = PostgresHook(postgres_conn_id="postgres_conn").get_conn()
+        try:
+            active_tables(conn, table)
+        finally:
+            conn.close()
+        submit_and_wait("job_silver.py", app_args=["--table", table])
 
     @task
-    def silver_apply() -> None:
+    def silver_apply(table: str) -> None:
         from airflow.providers.postgres.hooks.postgres import PostgresHook
-        from lib.silver_apply import apply_all
+        from lib.silver_apply import apply_all, resolve_table
 
         conn = PostgresHook(postgres_conn_id="postgres_conn").get_conn()
         try:
-            apply_all(conn)
+            apply_all(conn, resolve_table(table))
         finally:
             conn.close()
 
-    silver_spark() >> silver_apply()
+    silver_spark("{{ params.table }}") >> silver_apply("{{ params.table }}")
 
 
 platform_pipeline()

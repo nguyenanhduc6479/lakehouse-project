@@ -13,13 +13,15 @@ lib/silver_apply.py) applies staging and advances the checkpoint in one Postgres
 failure anywhere leaves the checkpoint where it was and the next run re-reads the same range.
 
 Generic: the tables and their keys come from `config.etl_checkpoint` (`source_table`,
-`key_columns`); a new source table needs a checkpoint row, not code.
+`key_columns`); a new source table needs a checkpoint row, not code. `--table silver.<name>`
+limits the run to one of them (default `all`).
 
 Runs on Python 3.8 (custom-spark image).
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 
 from helper import get_spark, postgres_jdbc_options
@@ -143,7 +145,22 @@ def process_table(spark: SparkSession, cp, jdbc: dict[str, str]) -> tuple | None
     return (target, start, end, rows)
 
 
+def select_checkpoints(checkpoints: list, table: str) -> list:
+    """All active checkpoint rows for `table = 'all'`, else only that table's (or fail)."""
+    if table == "all":
+        return checkpoints
+    selected = [cp for cp in checkpoints if cp["table_name"] == table]
+    if not selected:
+        known = ", ".join(sorted(cp["table_name"] for cp in checkpoints)) or "none"
+        raise ValueError(f"{table} is not an active silver table (active: {known})")
+    return selected
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="bronze -> staging for the silver layer")
+    parser.add_argument("--table", default="all", help="'all' or a silver table, e.g. silver.users")
+    table = parser.parse_args().table
+
     spark = get_spark("job_silver")
     jdbc = postgres_jdbc_options()
     checkpoints = (
@@ -157,10 +174,14 @@ def main() -> None:
         .load()
         .collect()
     )
+    checkpoints = select_checkpoints(checkpoints, table)
+    log.info("tables: %s", ", ".join(cp["table_name"] for cp in checkpoints))
     batches = [b for b in (process_table(spark, cp, jdbc) for cp in checkpoints) if b]
     # Written last: until here staging.batch still describes the previous run, whose range is
     # never ahead of the checkpoint, so a failure above can make silver_apply lag, never skip.
-    # truncate=true keeps the table definition (primary key) from postgres/schema.sql.
+    # truncate=true keeps the table definition (primary key) from postgres/schema.sql. A run for
+    # one table drops the other tables' rows too: their apply then waits for the next Spark run
+    # (which re-reads from their unchanged checkpoints), so nothing is lost.
     (
         spark.createDataFrame(batches, BATCH_SCHEMA)
         .write.format("jdbc")

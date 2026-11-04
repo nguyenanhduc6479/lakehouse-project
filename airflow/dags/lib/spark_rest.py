@@ -24,9 +24,16 @@ JOBS_DIR = "/opt/spark/jobs"
 SPARK_VERSION = "3.5.1"
 
 
-def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: int = 1800) -> None:
+def submit_and_wait(
+    job_file: str,
+    *,
+    app_args: list[str] | None = None,
+    poll_seconds: int = 10,
+    timeout_seconds: int = 1800,
+) -> None:
     """Submit `job_file` (e.g. 'job_bronze.py') and block until FINISHED; raise if FAILED.
 
+    `app_args` reach the job's sys.argv (SparkSubmit passes everything after the .py file on).
     helper.py is shipped along via spark.submit.pyFiles so the job can import it.
     """
     app_resource = f"file:{JOBS_DIR}/{job_file}"
@@ -35,7 +42,7 @@ def submit_and_wait(job_file: str, *, poll_seconds: int = 10, timeout_seconds: i
         "appResource": app_resource,
         "clientSparkVersion": SPARK_VERSION,
         "mainClass": "org.apache.spark.deploy.SparkSubmit",
-        "appArgs": [app_resource],
+        "appArgs": [app_resource, *(app_args or [])],
         "environmentVariables": {"SPARK_ENV_LOADED": "1"},
         "sparkProperties": {
             "spark.master": SPARK_MASTER,

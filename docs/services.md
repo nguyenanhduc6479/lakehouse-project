@@ -241,10 +241,17 @@ under `data-platform/bronze/`.
 
 ## Checking silver
 
-Silver is filled by DAG **`platform_pipeline`** (Airflow, http://localhost:8085 → trigger; or
-`docker exec airflow-scheduler airflow dags trigger platform_pipeline`). `silver_spark` stages new
+Silver is filled by DAG **`platform_pipeline`** (Airflow, http://localhost:8085 → *Trigger DAG*;
+or `docker exec airflow-scheduler airflow dags trigger platform_pipeline`). Param **`table`**:
+`all` (default) runs every active table of `config.etl_checkpoint`; a name (`users` or
+`silver.users`) runs only that one — in the UI fill the form, from the CLI add
+`-c '{"table": "users"}'`. A malformed name is refused at trigger time; an unknown one fails
+`silver_spark` within a second, listing the active tables. A one-table run also clears the other
+tables' `staging.batch` rows: their next run simply re-reads from their checkpoints. `silver_spark` stages new
 bronze events, `silver_apply` applies them; its log has one line per table, e.g.
-`silver.orders: snapshots (6610…, 4873…], 129 staged, 28 versions closed, 129 inserted`, or
+`silver.orders: snapshots (6610…, 4873…], 129 staged, 0 superseded, 28 versions closed, 129 inserted`
+(*superseded* = versions of a transaction that a sink commit split across two runs, replaced
+instead of closed — design §6.2), or
 `batch already applied ..., skipped` when nothing new arrived. The Spark side is in Grafana
 (`service="spark-job"`).
 
@@ -286,6 +293,9 @@ SELECT count(*) FROM (SELECT DISTINCT coalesce(after.order_id, before.order_id),
 
 Silver has fewer rows than bronze on purpose: Debezium duplicates are dropped, and an insert +
 update of one row in one transaction is a single version.
+
+The apply logic has its own tests on a scratch DB (`tests/test_silver_apply_db.py`, marker
+`postgres`): `set -a && . ./.env && set +a && venv/bin/python -m pytest -m postgres`.
 
 **Rebuild a table from bronze** (e.g. after changing the transform): in one transaction
 `TRUNCATE silver.orders;` and `UPDATE config.etl_checkpoint SET last_snapshot_id = NULL WHERE

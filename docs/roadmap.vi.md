@@ -430,7 +430,8 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   `silver` với `users` / `orders` / `order_details` (design §6.3) — `PRIMARY KEY (<key>, _lsn)`,
   partial unique index `(<key>) WHERE _is_current`, `CHECK ((_valid_to IS NULL) = _is_current)`,
   chuỗi nguồn là `text`, không FK/CHECK trên cột nguồn; schema `staging` với `staging.batch`.
-  Cột SCD2/hệ thống bắt đầu bằng `_`.
+  Cột SCD2/hệ thống bắt đầu bằng `_`; có `_tx_id` (transaction nguồn, thêm khi sửa theo review ở
+  dưới).
 - [x] `spark/jobs/job_silver.py`, **dùng chung**: danh sách bảng và key lấy từ
   `config.etl_checkpoint`. Mỗi bảng: snapshot hiện tại lấy từ `<table>.refs` (`main`); không có
   snapshot mới = no-op; ngược lại đọc incremental Iceberg `(last_snapshot_id, current]` (NULL thì
@@ -438,9 +439,12 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   overwrite, tạo lại mỗi lần chạy); `staging.batch` (start, end, số dòng) được ghi **cuối cùng**.
   `helper.postgres_jdbc_options()`; thêm `POSTGRES_*` cho `spark-master` / `spark-worker`.
 - [x] `airflow/dags/lib/silver_apply.py` (task `silver_apply`): mỗi bảng một transaction — từ chối
-  batch có start ≠ checkpoint, bỏ qua batch đã áp, `ADD COLUMN` cho cột staging mới, đóng + chèn
-  (design §6.4) với mọi giá trị được cast sang kiểu của silver, đẩy checkpoint lên. Các bảng áp
-  độc lập; task fail ở cuối nếu có bảng lỗi. Phần sinh SQL có test trên host (3 test).
+  batch có start ≠ checkpoint, bỏ qua batch đã áp, `ADD COLUMN` cho cột staging mới, rồi thay thế
+  (version có transaction còn tiếp tục trong staging) + đóng + chèn (design §6.4) với mọi giá trị
+  được cast sang kiểu của silver, đẩy checkpoint lên. Các bảng áp độc lập; task fail ở cuối nếu có
+  bảng lỗi. Test: phần sinh SQL trên host (3), bản thân bước apply trên một DB Postgres nháp (9,
+  marker `postgres`). Code dùng chung cho DAG nằm ở `airflow/dags/lib/` (chuyển từ
+  `airflow/plugins/`; `airflow/dags/.airflowignore` để DAG processor không quét thư mục này).
 - [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply`, `schedule=None`,
   `max_active_runs=1`.
 - [x] Đã kiểm tra 2026-11-04 (chạy DAG trên stack thật):
@@ -517,6 +521,13 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   trong silver, `numeric(18,2)` thành `numeric(38,2)`; nếu cần thì sửa bằng cách map kiểu từ Avro
   schema. Đã thêm vào kịch bản phase 8, cùng với: chạy silver sau compaction bronze, và snapshot lại
   khi generator đang chạy (CHECK `_valid_to >= _valid_from` có thể fail).
+- **Tham số DAG `table`** (2026-11-04): `all` (mặc định) hoặc một bảng (`users` / `silver.users`).
+  `submit_and_wait(app_args=)` truyền `--table` cho `job_silver.py` qua `appArgs` của REST;
+  `silver_apply` lọc theo cùng cách. Tên sai định dạng bị từ chối lúc trigger (pattern của
+  `Param`); tên không tồn tại được đối chiếu với `config.etl_checkpoint` trước khi submit, nên
+  fail trong ~1 giây kèm danh sách bảng active (kiểm tra trong job Spark chỉ hiện ra trong Airflow
+  dưới dạng `driverState FAILED`, ~1 phút sau). Đã kiểm tra: lần chạy `users` chỉ đụng tới users;
+  lần chạy `all` ngay sau đó xử lý hai bảng còn lại; silver vẫn giống hệt nguồn.
 - Bài học: **một luật gộp áp theo từng batch chỉ đúng nếu ranh giới batch không cắt ngang nhóm.** Ở
   đây batch bị cắt bởi các lần commit của sink, vốn không biết gì về transaction nguồn — nên luật
   phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình

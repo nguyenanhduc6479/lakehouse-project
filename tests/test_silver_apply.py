@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from lib.silver_apply import build_scd2_sql, quote_ident, quote_table, staging_table_of
+import pytest
+from lib.silver_apply import (
+    build_scd2_sql,
+    quote_ident,
+    quote_table,
+    resolve_table,
+    staging_table_of,
+)
 
 
 def test_quoting():
@@ -47,3 +54,17 @@ def test_composite_key():
     )
     assert 's."a" = st."a" AND s."b" = st."b"' in insert
     assert 's."a" = nxt."a" AND s."b" = nxt."b"' in close
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("all", "all"), (" ALL ", "all"), ("users", "silver.users"), ("silver.users", "silver.users")],
+)
+def test_resolve_table(value, expected):
+    assert resolve_table(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "bronze.users", "users; drop table x", "silver."])
+def test_resolve_table_rejects_anything_else(value):
+    with pytest.raises(ValueError):
+        resolve_table(value)

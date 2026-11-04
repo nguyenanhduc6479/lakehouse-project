@@ -22,6 +22,7 @@ Spark wrote (text timestamps, numeric(38,2) money), silver keeps the source type
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,19 @@ INSERT_TEMPLATE = """
 # ---------------------------------------------------------------------------
 # SQL building (pure, unit-tested in tests/test_silver_apply.py)
 # ---------------------------------------------------------------------------
+
+
+TABLE_ARG = re.compile(r"^(silver\.)?[a-z_][a-z0-9_]*$")
+
+
+def resolve_table(value: str) -> str:
+    """DAG param `table` -> 'all' or a silver table name: 'users' and 'silver.users' both work."""
+    value = value.strip().lower()
+    if value == "all":
+        return value
+    if not TABLE_ARG.match(value):
+        raise ValueError(f"table must be 'all' or a silver table name, got {value!r}")
+    return value if value.startswith("silver.") else f"silver.{value}"
 
 
 def quote_ident(name: str) -> str:
@@ -218,12 +232,24 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
     )
 
 
-def apply_all(conn) -> None:
-    """Apply every active silver table, one transaction each; raise if any failed."""
+def active_tables(conn, table: str = "all") -> list[tuple[str, list[str]]]:
+    """(table_name, key_columns) of every active silver table, or only of `table` (or fail)."""
     with conn.cursor() as cur:
         cur.execute(ACTIVE_TABLES_SQL)
         tables = cur.fetchall()
     conn.commit()
+    if table == "all":
+        return tables
+    selected = [t for t in tables if t[0] == table]
+    if not selected:
+        known = ", ".join(name for name, _ in tables) or "none"
+        raise ValueError(f"{table} is not an active silver table (active: {known})")
+    return selected
+
+
+def apply_all(conn, table: str = "all") -> None:
+    """Apply every active silver table (or only `table`), one transaction each; raise on failure."""
+    tables = active_tables(conn, table)
 
     failed = []
     for silver_table, key_columns in tables:

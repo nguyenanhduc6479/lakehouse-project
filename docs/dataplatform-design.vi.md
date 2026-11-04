@@ -601,9 +601,12 @@ hoặc join theo khoảng `_valid_from`/`_valid_to` cho báo cáo tại một th
 không bao giờ tính lại từ ES, nên trang web và dashboard luôn khớp nhau. Trang web là một trang
 HTML tĩnh duy nhất do API phục vụ.
 
-**Airflow — DAG `platform_pipeline`, `schedule=None`, kích hoạt thủ công:**
+**Airflow — DAG `platform_pipeline`, `schedule=None`, kích hoạt thủ công, `max_active_runs=1`.**
+Tham số `table`: `all` (mặc định) = mọi bảng active trong `config.etl_checkpoint`, hoặc một bảng
+(`users` hoặc `silver.users`; được kiểm tra bằng pattern lúc trigger và đối chiếu với bảng
+checkpoint trước khi submit bất cứ thứ gì).
 
-1. `silver_spark` — submit `job_silver.py` qua Spark REST 6066.
+1. `silver_spark` — submit `job_silver.py --table <table>` qua Spark REST 6066 (`appArgs`).
 2. `silver_apply` — chạy SQL SCD2 (§6.4) trên Postgres qua `postgres_conn` và đẩy checkpoint lên.
 3. Song song: `sync_es` và `dbt run` + `dbt test` trên ClickHouse.
 

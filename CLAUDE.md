@@ -72,7 +72,9 @@ no HA, replicas, poolers or TLS.
   `staging.batch`) and `airflow/dags/lib/silver_apply.py` (staging → silver SCD2 + checkpoint, one
   transaction per table) are **generic** — tables and keys come from `config.etl_checkpoint`
   (`pipeline = 'silver'`), so a new table needs DDL + a checkpoint row, no code. DAG
-  `airflow/dags/platform_pipeline.py` (`schedule=None`, `max_active_runs=1`). A new DAG file is
+  `airflow/dags/platform_pipeline.py` (`schedule=None`, `max_active_runs=1`, param `table`:
+  `all` or one table, passed to the Spark job as `--table` through `submit_and_wait(app_args=)`).
+  A new DAG file is
   triggerable only after the scheduler serializes it (`airflow dags reserialize`, else up to
   5 min; before that `dags trigger` → `DagNotFound`). Tests: `tests/test_job_silver.py` (spark),
   `tests/test_silver_apply.py` (host), `tests/test_silver_apply_db.py` (marker `postgres`: the
