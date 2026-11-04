@@ -42,7 +42,7 @@ no HA, replicas, poolers or TLS.
   11 bytecode; the worker runs Java 11) writes `lakehouse.bronze.{users,orders,order_details}_cdc`,
   one commit/snapshot per ~60 s, exactly-once (verified through a Connect restart: bronze rows =
   Kafka offsets, and rebuilding current state from bronze equals the source); Spark (Iceberg 1.10.2)
-  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). Phase 5 is **done** (2026-11-04): DAG `platform_pipeline` (`silver_spark` → `silver_apply`)
+  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). Phase 5 is **done** (2026-11-04): DAG `platform_pipeline` (`silver_spark` → `silver_apply` → `silver_verify`)
   builds SCD2 history in `data-platform.silver.*` from bronze (design §6.4; checks in
   `docs/services.md` → "Checking silver"). **Next: phase 6 (gold — ClickHouse + dbt + Superset).**
 - **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
@@ -72,13 +72,16 @@ no HA, replicas, poolers or TLS.
   `staging.batch`) and `airflow/dags/lib/silver_apply.py` (staging → silver SCD2 + checkpoint, one
   transaction per table) are **generic** — tables and keys come from `config.etl_checkpoint`
   (`pipeline = 'silver'`), so a new table needs DDL + a checkpoint row, no code. DAG
-  `airflow/dags/platform_pipeline.py` (`schedule=None`, `max_active_runs=1`, param `table`:
+  `airflow/dags/platform_pipeline.py` (`silver_spark` → `silver_apply` → `silver_verify`;
+  `airflow/dags/lib/silver_verify.py` checks silver invariants and reconciles with bronze at the
+  checkpoint snapshot via Trino `FOR VERSION AS OF`; `schedule=None`, `max_active_runs=1`, param `table`:
   `all` or one table, passed to the Spark job as `--table` through `submit_and_wait(app_args=)`).
   A new DAG file is
   triggerable only after the scheduler serializes it (`airflow dags reserialize`, else up to
   5 min; before that `dags trigger` → `DagNotFound`). Tests: `tests/test_job_silver.py` (spark),
-  `tests/test_silver_apply.py` (host), `tests/test_silver_apply_db.py` (marker `postgres`: the
-  SCD2 apply on a scratch DB `silver_apply_test` built from `postgres/schema.sql`, dropped
+  `tests/test_silver_apply.py` + `tests/test_silver_verify.py` (host),
+  `tests/test_silver_apply_db.py` (marker `postgres`: the SCD2 apply and the verify checks on a
+  scratch DB `silver_apply_test` built from `postgres/schema.sql`, dropped
   afterwards), `tests/test_generator.py`; `conftest.py` has a local Spark
   fixture.
 - `dbt/` holds only an empty `dbt_project.yml`; dbt-clickhouse (profile + models) arrives in the

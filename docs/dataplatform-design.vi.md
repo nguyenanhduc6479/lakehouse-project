@@ -612,7 +612,13 @@ checkpoint trước khi submit bất cứ thứ gì).
 
 1. `silver_spark` — submit `job_silver.py --table <table>` qua Spark REST 6066 (`appArgs`).
 2. `silver_apply` — chạy SQL SCD2 (§6.4) trên Postgres qua `postgres_conn` và đẩy checkpoint lên.
-3. Song song: `sync_es` và `dbt run` + `dbt test` trên ClickHouse.
+3. `silver_verify` — cho từng bảng: mỗi key đúng một version hiện tại, không có version dài 0,
+   chuỗi version của mỗi key không hở hay chồng lấn (Postgres), và số dòng / số dòng hiện tại =
+   số (key, txId) khác nhau / số key khác nhau của bronze đọc tại snapshot checkpoint (Trino
+   `FOR VERSION AS OF`, `trino_conn`), nên vẫn chính xác khi dữ liệu đang chảy vào. DAG fail nếu
+   có phép kiểm nào fail. (Silver so với nguồn chỉ đúng khi pipeline đã xử lý hết: kiểm tra tay,
+   `docs/services.md`.)
+4. Song song: `sync_es` và `dbt run` + `dbt test` trên ClickHouse.
 
 Bronze không phải là một bước Airflow: Iceberg sink ghi nó liên tục.
 

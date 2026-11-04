@@ -277,20 +277,34 @@ WHERE _valid_from <= TIMESTAMPTZ '2026-11-04 09:00+07'
   AND NOT _is_deleted;
 ```
 
-Consistency checks (stop the generator, wait ~1 min for the sink's last commit, run the DAG):
+**Consistency checks run automatically**: task **`silver_verify`** (last task of the DAG,
+`airflow/dags/lib/silver_verify.py`) checks every table of the run and fails the DAG if one check
+fails. Its log has one line per table, e.g.
+`silver.orders: OK (rows=1395, current_rows=924, live_rows=859, keys_without_one_current=0,
+zero_length_versions=0, broken_chains=0, bronze_versions=1395, bronze_keys=924)`.
 
 | Check | Must equal |
 |---|---|
-| `count(*) WHERE _is_current AND NOT _is_deleted` | `count(*)` of the table in `source-db` |
-| `count(*) WHERE _is_current` | distinct keys in bronze |
-| `count(*)` | distinct (key, `source.txid`) in bronze (Trino, below) |
-| `count(*) WHERE _valid_to = _valid_from` | 0 (a zero-length version = a transaction split across runs not merged) |
+| `keys_without_one_current` (keys with 0 or ≥ 2 current versions) | 0 |
+| `zero_length_versions` (`_valid_to = _valid_from`: a split transaction not merged) | 0 |
+| `broken_chains` (`_valid_to` ≠ next version's `_valid_from`, by `_lsn`: gap or overlap) | 0 |
+| `rows` | `bronze_versions`: distinct (key, `source.txid`) in bronze |
+| `current_rows` | `bronze_keys`: distinct keys in bronze |
+
+Bronze is read **at the checkpoint snapshot** (Trino `FOR VERSION AS OF <last_snapshot_id>`), so
+the comparison is exact even while the generator keeps writing — bronze's newer snapshots are
+simply not looked at:
 
 ```sql
--- Trino: expected silver row count for orders
-SELECT count(*) FROM (SELECT DISTINCT coalesce(after.order_id, before.order_id), source.txid
-                      FROM lakehouse.bronze.orders_cdc) t;
+-- Trino: what silver_verify compares silver.orders with
+SELECT count(DISTINCT (coalesce(after.order_id, before.order_id), source.txid)),
+       count(DISTINCT coalesce(after.order_id, before.order_id))
+FROM lakehouse.bronze.orders_cdc FOR VERSION AS OF <last_snapshot_id of silver.orders>;
 ```
+
+One check stays manual, because it only holds once the pipeline is drained (stop the generator,
+wait ~1 min for the sink's last commit, run the DAG): `count(*) WHERE _is_current AND NOT
+_is_deleted` (`live_rows` in the log) = `count(*)` of the table in `source-db`.
 
 Silver has fewer rows than bronze on purpose: Debezium duplicates are dropped, and an insert +
 update of one row in one transaction is a single version.

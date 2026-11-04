@@ -445,7 +445,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   (3), the apply itself on a scratch Postgres DB (9, marker `postgres`). Shared DAG code lives in
   `airflow/dags/lib/` (moved from `airflow/plugins/`; `airflow/dags/.airflowignore` keeps the DAG
   processor out of it).
-- [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply`, `schedule=None`,
+- [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply` (→ `silver_verify`, added after the phase), `schedule=None`,
   `max_active_runs=1`.
 - [x] Verified 2026-11-04 (DAG runs on the live stack):
   - first run (full read): 156 / 640 / 1459 versions; rows = distinct (key, txId) in bronze,
@@ -537,6 +537,15 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   `per-file-target-version` `py38` for `spark/jobs/**`; and `.options(**jdbc, url=...)` raises
   "multiple values for keyword argument" — the three failed runs only showed that the safety
   holds (staging rewritten, batch not, checkpoint unchanged, next run re-read everything).
+- **Task `silver_verify`** (2026-11-04), last in `platform_pipeline`, same `table` param: the
+  silver checks that were manual queries now run every time and fail the DAG — per table
+  `keys_without_one_current`, `zero_length_versions`, `broken_chains` = 0, and silver rows /
+  current rows = distinct (key, txId) / distinct keys of bronze read **at the checkpoint
+  snapshot** (Trino `FOR VERSION AS OF`), which makes the comparison exact while the generator
+  keeps writing (verified: run with the generator on, all OK, 3023 / 1395 / 358 rows = bronze).
+  A `_valid_to` shifted by 1 s on one real version made it fail with `broken_chains` (reverted).
+  Tests: 3 host (SQL), 4 on the scratch DB (normal apply, broken histories, bronze mismatch,
+  before the first apply). Only "silver = source" stays manual: it holds only once drained.
 - Lesson: **a grouping rule applied per batch is only correct if a batch boundary can't cut the
   group.** Here batches are cut by the sink's commits, which know nothing about source
   transactions — so the rule had to be finished across batches in the apply. Test the boundary,

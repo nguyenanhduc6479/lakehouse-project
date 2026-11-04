@@ -604,7 +604,12 @@ table before anything is submitted).
 1. `silver_spark` — submit `job_silver.py --table <table>` via Spark REST 6066 (`appArgs`).
 2. `silver_apply` — run the SCD2 SQL (§6.4) on Postgres through `postgres_conn` and advance the
    checkpoint.
-3. In parallel: `sync_es` and `dbt run` + `dbt test` on ClickHouse.
+3. `silver_verify` — per table: one current version per key, no zero-length version, no gap or
+   overlap in a key's chain (Postgres), and rows / current rows = distinct (key, txId) / distinct
+   keys of bronze read at the checkpoint snapshot (Trino `FOR VERSION AS OF`, `trino_conn`), so it
+   is exact while data keeps flowing. Fails the DAG if any check fails. (Silver vs the source is
+   only true once drained: a manual check, `docs/services.md`.)
+4. In parallel: `sync_es` and `dbt run` + `dbt test` on ClickHouse.
 
 Bronze is not an Airflow step: the Iceberg sink writes it continuously.
 

@@ -3,6 +3,8 @@
 silver_spark: submit spark/jobs/job_silver.py (bronze -> staging) through the Spark REST API.
 silver_apply: apply staging to silver as SCD2 and advance the checkpoints (Postgres, one
 transaction per table) — airflow/dags/lib/silver_apply.py.
+silver_verify: silver invariants + reconciliation with bronze at the checkpoint snapshot (Trino)
+— airflow/dags/lib/silver_verify.py.
 
 Param `table`: `all` (default) = every active table in config.etl_checkpoint; or one table,
 `users` / `silver.users`. From the CLI:
@@ -63,7 +65,22 @@ def platform_pipeline():
         finally:
             conn.close()
 
-    silver_spark("{{ params.table }}") >> silver_apply("{{ params.table }}")
+    @task
+    def silver_verify(table: str) -> None:
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+        from airflow.providers.trino.hooks.trino import TrinoHook
+        from lib.silver_apply import resolve_table
+        from lib.silver_verify import verify_all
+
+        trino = TrinoHook(trino_conn_id="trino_conn")
+        conn = PostgresHook(postgres_conn_id="postgres_conn").get_conn()
+        try:
+            verify_all(conn, trino.get_records, resolve_table(table))
+        finally:
+            conn.close()
+
+    table = "{{ params.table }}"
+    silver_spark(table) >> silver_apply(table) >> silver_verify(table)
 
 
 platform_pipeline()

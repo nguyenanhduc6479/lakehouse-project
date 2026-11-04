@@ -1,4 +1,4 @@
-"""silver_apply.apply_table on a real Postgres (airflow/dags/lib/silver_apply.py).
+"""silver_apply and silver_verify on a real Postgres (airflow/dags/lib/silver_*.py).
 
 Runs against a scratch database `silver_apply_test` created from postgres/schema.sql in the
 `postgres` container (host port 5432) and dropped afterwards — the real `data-platform` DB is
@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from lib.silver_apply import apply_all, apply_table
+from lib.silver_verify import INVARIANTS, verify_table
 
 psycopg = pytest.importorskip("psycopg")
 
@@ -133,17 +134,24 @@ def checkpoint(conn):
     ).fetchone()[0]
 
 
+def verify(conn, bronze=None):
+    """silver_verify on silver.orders; `bronze` = what Trino would return (versions, keys)."""
+    calls = []
+
+    def trino_query(sql):
+        calls.append(sql)
+        return [bronze]
+
+    with conn.cursor() as cur:
+        counts, failed = verify_table(cur, trino_query, "silver.orders", ["order_id"])
+    conn.commit()
+    return counts, failed, calls
+
+
 def assert_consistent(conn):
-    """The invariants of docs/services.md -> "Checking silver"."""
-    (zero_length,) = conn.execute(
-        "SELECT count(*) FROM silver.orders WHERE _valid_to = _valid_from"
-    ).fetchone()
-    (gaps,) = conn.execute(
-        "SELECT count(*) FROM (SELECT _valid_to, lead(_valid_from) OVER "
-        "(PARTITION BY order_id ORDER BY _lsn) AS nxt FROM silver.orders) x "
-        "WHERE _valid_to IS DISTINCT FROM nxt"
-    ).fetchone()
-    assert (zero_length, gaps) == (0, 0)
+    """silver_verify's invariants (one current per key, no zero-length version, no gap)."""
+    counts, _, _ = verify(conn, bronze=(0, 0))
+    assert {name: counts[name] for name in INVARIANTS} == dict.fromkeys(INVARIANTS, 0)
 
 
 def test_first_batch_inserts_the_chain(conn):
@@ -244,3 +252,55 @@ def test_apply_all_for_one_table(conn):
     assert checkpoint(conn) == 1
     with pytest.raises(ValueError, match="silver.nope is not an active silver table"):
         apply_all(conn, "silver.nope")
+
+
+def insert_silver(conn, rows):
+    """Write versions straight into silver (bypassing the apply) to build broken histories."""
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO silver.orders (order_id, status, _valid_from, _valid_to, _is_current, "
+            "_lsn, _tx_id) VALUES (%s, 'x', %s, %s, %s, %s, %s)",
+            rows,
+        )
+    conn.execute("UPDATE config.etl_checkpoint SET last_snapshot_id = 1")
+    conn.commit()
+
+
+def test_verify_passes_after_a_normal_apply(conn):
+    stage(conn, [row(1, "pending", 100, 6, T(0), T(10)), row(1, "paid", 200, 7, T(10))], None, 1)
+    apply(conn)
+    counts, failed, calls = verify(conn, bronze=(2, 1))
+    assert failed == []
+    assert (counts["rows"], counts["current_rows"], counts["bronze_versions"]) == (2, 1, 2)
+    assert "FOR VERSION AS OF 1" in calls[0]
+
+
+def test_verify_finds_broken_histories(conn):
+    insert_silver(
+        conn,
+        [
+            # key 1: zero-length version before the current one
+            (1, T(10), T(10), False, 100, 6),
+            (1, T(10), None, True, 101, 7),
+            # key 2: no current version at all
+            (2, T(0), T(5), False, 200, 8),
+            # key 3: gap between 10 and 20
+            (3, T(0), T(10), False, 300, 9),
+            (3, T(20), None, True, 301, 10),
+        ],
+    )
+    # bronze agrees with silver's counts, so only the history invariants can fail
+    _, failed, _ = verify(conn, bronze=(5, 2))
+    assert set(failed) == {"keys_without_one_current", "zero_length_versions", "broken_chains"}
+
+
+def test_verify_finds_a_bronze_mismatch(conn):
+    stage(conn, [row(1, "pending", 100, 6, T(0))], None, 1)
+    apply(conn)
+    _, failed, _ = verify(conn, bronze=(3, 2))
+    assert failed == ["rows_vs_bronze_versions", "current_rows_vs_bronze_keys"]
+
+
+def test_verify_before_the_first_apply_skips_bronze(conn):
+    counts, failed, calls = verify(conn)
+    assert (counts["rows"], failed, calls) == (0, [], [])

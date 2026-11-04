@@ -445,7 +445,7 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   bảng lỗi. Test: phần sinh SQL trên host (3), bản thân bước apply trên một DB Postgres nháp (9,
   marker `postgres`). Code dùng chung cho DAG nằm ở `airflow/dags/lib/` (chuyển từ
   `airflow/plugins/`; `airflow/dags/.airflowignore` để DAG processor không quét thư mục này).
-- [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply`, `schedule=None`,
+- [x] DAG `airflow/dags/platform_pipeline.py`: `silver_spark` → `silver_apply` (→ `silver_verify`, thêm sau phase), `schedule=None`,
   `max_active_runs=1`.
 - [x] Đã kiểm tra 2026-11-04 (chạy DAG trên stack thật):
   - lần đầu (đọc toàn bộ): 156 / 640 / 1459 phiên bản; số dòng = số cặp (key, txId) khác nhau
@@ -538,6 +538,15 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   cho `spark/jobs/**`; và `.options(**jdbc, url=...)` báo "multiple values for keyword argument" —
   ba lần chạy fail đó chỉ chứng minh cơ chế an toàn hoạt động (staging bị ghi lại, batch thì
   không, checkpoint giữ nguyên, lần sau đọc lại hết).
+- **Task `silver_verify`** (2026-11-04), cuối `platform_pipeline`, cùng tham số `table`: các phép
+  kiểm silver trước đây chạy tay giờ chạy mỗi lần và làm DAG fail — cho từng bảng
+  `keys_without_one_current`, `zero_length_versions`, `broken_chains` = 0, và số dòng / số dòng hiện
+  tại của silver = số (key, txId) khác nhau / số key khác nhau của bronze đọc **tại snapshot
+  checkpoint** (Trino `FOR VERSION AS OF`), nhờ vậy phép so sánh chính xác ngay cả khi generator
+  vẫn đang ghi (đã kiểm tra: chạy khi generator đang bật, tất cả OK, 3023 / 1395 / 358 dòng = bronze).
+  Làm lệch `_valid_to` của một version thật 1 giây thì task fail với `broken_chains` (đã hoàn tác).
+  Test: 3 trên host (SQL), 4 trên DB nháp (apply bình thường, lịch sử hỏng, lệch với bronze, trước
+  lần apply đầu). Chỉ còn "silver = nguồn" là kiểm tra tay: nó chỉ đúng khi pipeline đã xử lý hết.
 - Bài học: **một luật gộp áp theo từng batch chỉ đúng nếu ranh giới batch không cắt ngang nhóm.** Ở
   đây batch bị cắt bởi các lần commit của sink, vốn không biết gì về transaction nguồn — nên luật
   phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình
