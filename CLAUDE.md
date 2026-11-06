@@ -78,9 +78,11 @@ no HA, replicas, poolers or TLS.
   `airflow/dags/lib/silver_verify.py` checks silver invariants and reconciles with bronze at the
   checkpoint snapshot via Trino `FOR VERSION AS OF`; `schedule=None`, `max_active_runs=1`, param `table`:
   `all` or one table, passed to the Spark job as `--table` through `submit_and_wait(app_args=)`;
-  param `full_refresh` (bool, one table only): `--full-refresh` stages all of bronze with a batch
-  row without start snapshot, and `silver_apply` recognises that row by itself and replaces the
-  table in one transaction. The DAG has `render_template_as_native_obj=True`: every param reaches
+  param `full_refresh` (bool, one table only — `job_silver.py` refuses `all` too): `--full-refresh`
+  stages all of bronze and writes the batch row with `staging.batch.full_refresh = true` (explicit,
+  never inferred from a NULL start: the first batch has none either); `silver_apply` reads that
+  flag, replaces the table in one transaction and sets the flag back to false, so re-running
+  `silver_apply` never rebuilds it again. The DAG has `render_template_as_native_obj=True`: every param reaches
   its task as an argument rendered from `"{{ params.<name> }}"`, with its real type — without it
   the bool renders as the string `"False"`, which is truthy; `silver_spark` also checks the type).
   A new DAG file is
@@ -262,6 +264,9 @@ the others by service name. All credentials and tunables live in `.env` and are 
   version with `iceberg.rest-catalog.oauth2.scope` (435 fails with `invalid_scope`). `LESSCHARSET=utf-8` in
   its environment: the image locale is POSIX, so the CLI's pager (`less`) showed UTF-8 as `<E1>…`.
   Right after a (re)start it answers "No nodes available" for a few seconds although healthy.
+  Heap fixed at **2 GB** by `trino/jvm.config` (the image's file with `-Xmx2G` instead of
+  `MaxRAMPercentage=80`, which sized it from the whole WSL VM and held ~4.4 GB; mounted as one
+  file — after editing: `docker compose up -d --force-recreate trino`).
 - **Orchestration** (`compose/airflow.yml`): Airflow 2.9.2, LocalExecutor, `custom-airflow:2.9.2`
   from `airflow/Dockerfile` (+ `airflow/requirements.txt`, installed against the 2.9.2
   constraints). UI on **8085**. Its metadata DB is reached as the `airflow` role (owner of DB

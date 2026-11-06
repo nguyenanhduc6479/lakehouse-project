@@ -550,15 +550,20 @@ của nguồn. Cột thêm sau sẽ có kiểu của staging (một cột timest
 sửa tay).
 
 Dựng lại toàn bộ một bảng từ bronze — tham số DAG `full_refresh` (§9): `job_silver.py
---full-refresh` bỏ qua checkpoint và đưa toàn bộ bảng bronze vào staging, ghi một dòng batch **không
-có snapshot bắt đầu**. Bước apply chỉ dựa vào đó để nhận ra full refresh (start NULL trong khi
-checkpoint đã có — batch cộng dồn luôn bắt đầu tại checkpoint; lần chạy đầu tiên thì chưa có
-checkpoint) và, trong cùng transaction, `DELETE` bảng silver trước khi insert (`DELETE` chứ không
-`TRUNCATE`: người đọc vẫn thấy dữ liệu cũ tới lúc commit thay vì phải chờ khóa độc quyền). Nó không
+--full-refresh` (một bảng; `all` bị từ chối) bỏ qua checkpoint, đưa toàn bộ bảng bronze vào staging
+và ghi dòng batch với **`full_refresh = true`**. Bước apply kiểm tra cột đó và, trong cùng
+transaction, `DELETE` bảng silver trước khi insert (`DELETE` chứ không `TRUNCATE`: người đọc vẫn
+thấy dữ liệu cũ tới lúc commit thay vì phải chờ khóa độc quyền), rồi đặt lại cờ về false. Nó không
 bị bỏ qua khi bronze không có snapshot mới, và bị từ chối nếu bronze không có snapshot nào. Quyết
-định dựa trên `staging.batch` thay vì tham số DAG nên chạy lại riêng `silver_apply` không thể xóa
-sạch silver bằng một batch cộng dồn. Chỉ reset checkpoint thì không có tác dụng: mọi event đều bị
-bỏ qua nhờ `_lsn`.
+định dựa trên `staging.batch` thay vì tham số DAG nên chạy lại riêng `silver_apply` vẫn đúng trong
+mọi trường hợp. Cờ được ghi rõ thay vì suy ra từ snapshot bắt đầu NULL, vì batch đầu tiên cũng
+không có start: áp lại nó (dòng của nó có thể nằm trong `staging.batch` nhiều ngày, được
+`merge_batches` giữ lại khi các bảng khác chạy) phải là "already applied", không phải một lần
+rebuild âm thầm. Tắt cờ sau khi dùng cho dòng full refresh cùng sự bảo đảm đó. Mỗi lần rebuild là
+thao tác nặng với các layer sau: mọi dòng nhận `_silver_updated_at` mới, và các key hoặc version
+silver không còn sẽ biến mất, nên các model gold incremental và index ES của bảng đó cũng phải
+rebuild (§7, §8). Chỉ reset checkpoint thì không có tác dụng: mọi event đều bị bỏ qua nhờ
+`_lsn`.
 
 ## 7. Elasticsearch — tìm kiếm
 

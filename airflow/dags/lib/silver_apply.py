@@ -11,15 +11,16 @@ Per table, in ONE Postgres transaction:
 4. move the checkpoint to the snapshot staging was read up to.
 
 **Full refresh** (DAG param `full_refresh`, job_silver `--full-refresh`): staging then holds the
-whole bronze table and its batch row has no start snapshot while the checkpoint has one — an
-incremental batch always starts at the checkpoint, so this can't be mistaken for one (the very
-first run has no checkpoint and is applied normally). The apply then deletes every silver row of
-the table first, in the same transaction: readers keep seeing the old silver until the commit,
-and a failure leaves it untouched. It is recognised from staging.batch, not from the DAG param,
-so re-running only silver_apply can never wipe silver with an incremental batch. A side effect:
-re-applying the very first batch of a table (also no start) is a full refresh too — correct, it
-holds the whole bronze table, and gives the same history (only `_silver_updated_at` changes).
-A full-refresh batch whose bronze table has no snapshot is refused instead of emptying silver.
+whole bronze table and its batch row says `full_refresh = true`. The apply deletes every silver
+row of the table first, in the same transaction: readers keep seeing the old silver until the
+commit, and a failure leaves it untouched. The flag is read from staging.batch, not from the DAG
+param, so re-running only silver_apply does the right thing either way; it is explicit, not
+inferred from a missing start snapshot, because the very first batch of a table has none either
+and re-applying it must stay an "already applied" no-op. The apply sets the flag back to false
+in the same transaction: a full refresh happens once, and a later re-run (or a batch row kept for
+days by job_silver's merge) can't silently rebuild the table again — that would also give every
+row a new `_silver_updated_at`. A full-refresh batch whose bronze table has no snapshot is
+refused instead of emptying silver.
 
 Either all of it commits or nothing does. Tables are applied independently (silver is
 eventually consistent across tables): one failing table does not stop the others, but the task
@@ -50,10 +51,13 @@ ACTIVE_TABLES_SQL = """
 """
 
 BATCH_SQL = """
-    SELECT start_snapshot_id, end_snapshot_id, row_count
+    SELECT start_snapshot_id, end_snapshot_id, row_count, full_refresh
     FROM staging.batch
     WHERE table_name = %s
 """
+
+# a full refresh is applied once: afterwards its batch row is an ordinary applied batch
+FULL_REFRESH_DONE_SQL = "UPDATE staging.batch SET full_refresh = false WHERE table_name = %s"
 
 # FOR UPDATE: a concurrent apply of the same table waits instead of racing on the checkpoint
 CHECKPOINT_SQL = """
@@ -210,13 +214,12 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
     batch = cur.fetchone()
     if batch is None:
         return f"{silver_table}: no staging batch, skipped"
-    start, end, rows = batch
+    start, end, rows, full_refresh = batch
 
     cur.execute(CHECKPOINT_SQL, (silver_table,))
     checkpoint = cur.fetchone()[0]
     # checked before the "already applied" test: a full refresh runs even when bronze has no
     # new snapshot (end == checkpoint)
-    full_refresh = start is None and checkpoint is not None
     if not full_refresh:
         if end == checkpoint:
             return f"{silver_table}: batch already applied (checkpoint {checkpoint}), skipped"
@@ -257,6 +260,7 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
 
     cur.execute(ADVANCE_CHECKPOINT_SQL, (end, silver_table))
     if full_refresh:
+        cur.execute(FULL_REFRESH_DONE_SQL, (silver_table,))
         return (
             f"{silver_table}: FULL REFRESH from bronze up to snapshot {end} (checkpoint was "
             f"{checkpoint}): {deleted} old rows deleted, {rows} staged, {inserted} inserted"

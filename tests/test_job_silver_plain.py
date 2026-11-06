@@ -62,3 +62,17 @@ def test_full_refresh_takes_no_value():
     # a value like "false" would be truthy if it were accepted
     with pytest.raises(SystemExit):
         parse_args(["--full-refresh", "false"])
+
+
+def test_full_refresh_of_every_table_is_refused():
+    with pytest.raises(SystemExit):
+        parse_args(["--full-refresh"])  # --table defaults to all
+
+
+def test_merge_keeps_a_pending_full_refresh():
+    existing = [("silver.orders", None, 4, 7, True, OLD)]
+    new = [("silver.users", 6, 9, 3, False, NOW)]
+    assert merge_batches(existing, new, ["silver.orders", "silver.users"]) == [
+        ("silver.orders", None, 4, 7, True, OLD),
+        ("silver.users", 6, 9, 3, False, NOW),
+    ]

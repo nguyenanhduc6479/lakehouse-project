@@ -162,8 +162,14 @@ CREATE TABLE IF NOT EXISTS staging.batch (
     start_snapshot_id bigint,                    -- checkpoint the read started after (NULL = full read)
     end_snapshot_id   bigint,                    -- bronze snapshot read up to -> the new checkpoint
     row_count         bigint      NOT NULL,      -- rows in staging.<table>; 0 = nothing to apply
-    created_at        timestamptz NOT NULL DEFAULT now()
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    -- true = job_silver --full-refresh staged the whole bronze table: silver_apply replaces the
+    -- silver table, then sets it back to false (a full refresh is applied once, never again by a
+    -- re-run). Explicit, not inferred from start IS NULL: the very first batch has no start either
+    full_refresh      boolean     NOT NULL DEFAULT false
 );
+-- databases created before the column existed (same position: last)
+ALTER TABLE staging.batch ADD COLUMN IF NOT EXISTS full_refresh boolean NOT NULL DEFAULT false;
 
 -- ---------------------------------------------------------
 -- Checkpoint rows for the silver step (NULL snapshot = first run reads the whole bronze table).

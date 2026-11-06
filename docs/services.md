@@ -341,7 +341,14 @@ docker exec airflow-scheduler airflow dags trigger platform_pipeline \
 `silver_spark` stages the whole bronze table, `silver_apply` replaces the silver table in one
 transaction (log: `silver.users: FULL REFRESH from bronze up to snapshot ...: N old rows deleted,
 M staged, M inserted`; readers see the old rows until the commit), then `silver_verify` and gold
-run as usual. It runs even if bronze has no new snapshot. `all` is refused (one table per run).
+run as usual. It runs even if bronze has no new snapshot. `all` is refused (one table per run;
+`job_silver.py` refuses `--full-refresh` without `--table` too). The request is the batch row's
+`staging.batch.full_refresh` flag, set by the Spark job and cleared by the apply in the same
+transaction as the rebuild — so clearing/re-running `silver_apply` afterwards prints `batch
+already applied` instead of rebuilding again. Every row gets a new `_silver_updated_at`.
+Also a **recovery path**: it reads only the current bronze snapshot, so it works when the
+checkpoint snapshot was expired by mistake (the incremental read then fails: it walks the
+snapshot chain back to the checkpoint).
 Resetting only the checkpoint by hand does nothing — every event is skipped by `_lsn`; the
 manual equivalent is `TRUNCATE` + checkpoint `NULL` in one transaction, then a normal run (silver
 is empty in between). Full refresh recomputes the data, not the DDL: column types stay as they

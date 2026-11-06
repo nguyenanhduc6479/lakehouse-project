@@ -560,6 +560,23 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   giữ nguyên, bronze rỗng bị từ chối) + 3 test cho cờ. Đã kiểm tra: làm hỏng `silver.users` (ghi đè
   tên hiện hành, xóa 6 version cũ) → full refresh → lịch sử giống từng byte với trước đó (516 dòng),
   verify OK, = nguồn; `all` + `full_refresh` bị từ chối; lần chạy kế tiếp không có conf là cộng dồn.
+  Sửa theo review (cùng ngày): ban đầu bước apply *suy ra* full refresh từ "không có snapshot bắt
+  đầu trong khi checkpoint đã có" — điều này cũng đúng với batch đầu tiên của một bảng khi được áp
+  lại, và `merge_batches` có thể giữ dòng đó nhiều ngày; chạy lại riêng `silver_apply` khi đó sẽ
+  âm thầm rebuild bảng và gán `_silver_updated_at` mới cho mọi dòng (gold/ES sau này sẽ coi là
+  "tất cả đã đổi"). Giờ yêu cầu được ghi rõ: cột **`staging.batch.full_refresh`** (`boolean NOT
+  NULL DEFAULT false`, `ALTER ... ADD COLUMN IF NOT EXISTS` cho DB đã có), do Spark job ghi, apply
+  đọc và **đặt lại về false trong cùng transaction rebuild** (chỉ áp một lần — để nguyên cờ thì vấn
+  đề chỉ chuyển sang dòng full refresh). `job_silver.py` cũng từ chối `--full-refresh` đi cùng
+  `--table all` (chạy `spark-submit` tay thì bỏ qua được kiểm tra của DAG). Test: áp lại batch đầu
+  → "already applied", `_silver_updated_at` không đổi; full refresh chỉ áp một lần; CLI từ chối;
+  cờ đang chờ vẫn còn sau `merge_batches`. Đã kiểm tra trên stack: migration trên DB đang chạy,
+  full refresh `users` (xóa 516 / chèn 516, cờ đã tắt), rồi clear riêng `silver_apply` → "batch
+  already applied", `_silver_updated_at` không đổi.
+- Bài học: **ghi rõ yêu cầu, đừng suy ra nó từ việc các giá trị tình cờ trùng nhau.** "Không có
+  snapshot bắt đầu" mang hai nghĩa (batch đầu tiên, full refresh); phép suy luận cho kết quả dữ
+  liệu đúng nhưng kích hoạt một thao tác nặng không ai yêu cầu. Một cờ tường minh, được chính bước
+  xử lý nó tiêu thụ, làm cho việc chạy lại trở nên vô hại.
 - Bài học: **một luật gộp áp theo từng batch chỉ đúng nếu ranh giới batch không cắt ngang nhóm.** Ở
   đây batch bị cắt bởi các lần commit của sink, vốn không biết gì về transaction nguồn — nên luật
   phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình
@@ -605,6 +622,11 @@ gold — chưa làm dashboard.
   73 giây, khởi động lại sau 52 giây với "exists, resetting its password", SQL Lab vẫn thấy gold; DB
   và role `superset` cũ đã được xóa.)*
 - [ ] Gold incremental với watermark `_silver_updated_at` (`ReplacingMergeTree`, design §8).
+  **Truyền full refresh của silver xuống tiếp:** nó có thể xóa các key và version silver từng có,
+  còn model incremental (append + `ReplacingMergeTree`) chỉ thêm dòng — không bao giờ bỏ một key đã
+  rời silver. Khi bật `full_refresh`, `gold_dbt_run` phải chạy `dbt run --full-refresh --select
+  <các model dựng từ bảng đó>+` (hiện gold rebuild toàn bộ mỗi lần nên chưa sao). ES ở phase 7
+  cũng vậy.
 - [ ] Thêm model: `dim_date`, `fct_order_lines`, mart (doanh thu theo ngày / theo thành phố).
 - [x] Sửa theo review (2026-11-06):
   - **Dashboard nằm trong git.** Metadata của Superset là một file SQLite trên volume, nên
@@ -663,7 +685,9 @@ healthcheck); log ClickHouse và Superset lên Loki.
 
 - [ ] Task `sync_es` trong `platform_pipeline` (chạy song song với dbt): mỗi đơn hàng là một
   document; dựng lại các đơn có chính nó, dòng chi tiết hoặc user thay đổi; xóa các đơn đã
-  `_is_deleted`; client `elasticsearch` bản 7.x.
+  `_is_deleted`; client `elasticsearch` bản 7.x. Sau một lần `full_refresh` silver, dựng lại toàn
+  bộ index của những gì bảng đó cung cấp thay vì sync theo watermark: mọi dòng đều trông như đã đổi,
+  và các đơn đã rời silver sẽ không bao giờ bị xóa (xem mục incremental của phase 6).
 - [ ] Service FastAPI: `GET /search?q=` (ES), `GET /orders/{id}` và `/orders/{id}/history`
   (silver), `GET /stats/...` (gold).
 - [ ] Một trang HTML tĩnh do API phục vụ.
@@ -679,7 +703,10 @@ healthcheck); log ClickHouse và Superset lên Loki.
 
 - [ ] DAG `platform_maintenance` (`schedule=None`): compaction Iceberg / expire snapshot (không bao
   giờ vượt quá checkpoint của silver) / xóa file mồ côi; đối soát số dòng nguồn với silver; độ trễ
-  replication slot.
+  replication slot. Mục runbook — **khôi phục khi lỡ expire mất snapshot checkpoint**: đọc
+  incremental sẽ lỗi (nó đi ngược chuỗi snapshot về tới checkpoint), nhưng `full_refresh` cho bảng
+  đó chỉ đọc snapshot hiện tại, không cần snapshot cũ nào; nó cũng chuyển checkpoint sang snapshot
+  hiện tại. Kiểm thử nó như một kịch bản.
 - [ ] Chạy mọi kịch bản trong design §10 và ghi kết quả vào README — gồm cả các kịch bản thêm
   từ review phase 5: kiểu của cột mới trong silver, chạy silver sau compaction bronze, snapshot
   lại khi generator đang chạy.

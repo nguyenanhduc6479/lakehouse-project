@@ -541,15 +541,20 @@ timestamp strings as `text`), silver keeps the source types. A column added late
 staging's type (a new timestamp column would be `text` until altered by hand).
 
 Full rebuild of one table from bronze — DAG param `full_refresh` (§9): `job_silver.py
---full-refresh` ignores the checkpoint and stages the whole bronze table, writing a batch row with
-**no start snapshot**. The apply recognises a full refresh from that alone (start NULL while the
-checkpoint is set — an incremental batch always starts at the checkpoint; the very first run has
-no checkpoint) and, in the same transaction, `DELETE`s the silver table before inserting
-(`DELETE`, not `TRUNCATE`: readers keep the old rows until the commit instead of waiting on an
-exclusive lock). It is not skipped when bronze has no new snapshot, and is refused if bronze has
-no snapshot at all. Deciding from `staging.batch` rather than the DAG param means re-running only
-`silver_apply` can't wipe silver with an incremental batch. Only resetting the checkpoint is a
-no-op: every event would be skipped by `_lsn`.
+--full-refresh` (one table; `all` is refused) ignores the checkpoint, stages the whole bronze
+table and writes its batch row with **`full_refresh = true`**. The apply checks that column and,
+in the same transaction, `DELETE`s the silver table before inserting (`DELETE`, not `TRUNCATE`:
+readers keep the old rows until the commit instead of waiting on an exclusive lock), then sets
+the flag back to false. It is not skipped when bronze has no new snapshot, and is refused if
+bronze has no snapshot at all. Deciding from `staging.batch` rather than the DAG param means
+re-running only `silver_apply` does the right thing either way. The flag is explicit instead of
+inferred from a NULL start snapshot because the very first batch has no start either: re-applying
+it (its row may sit in `staging.batch` for days, kept by `merge_batches` while other tables run)
+must stay an "already applied" no-op, not a silent rebuild. Clearing the flag after use gives
+the full-refresh row the same guarantee. Each rebuild is heavy for what comes after it: every row
+gets a new `_silver_updated_at`, and keys or versions silver no longer has disappear, so the
+incremental gold models and the ES index of that table must be rebuilt too (§7, §8). Only
+resetting the checkpoint is a no-op: every event would be skipped by `_lsn`.
 
 ## 7. Elasticsearch — search
 

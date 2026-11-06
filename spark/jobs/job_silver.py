@@ -16,7 +16,9 @@ failure anywhere leaves the checkpoint where it was and the next run re-reads th
 
 Generic: the tables and their keys come from `config.etl_checkpoint` (`source_table`,
 `key_columns`); a new source table needs a checkpoint row, not code. `--table silver.<name>`
-limits the run to one of them (default `all`).
+limits the run to one of them (default `all`). `--full-refresh` (needs one table) ignores its
+checkpoint, stages the whole bronze table and marks the batch row `full_refresh = true`, which
+makes silver_apply replace that silver table.
 
 Runs on Python 3.8 (custom-spark image).
 """
@@ -45,8 +47,11 @@ BATCH_SCHEMA = T.StructType(
         T.StructField("start_snapshot_id", T.LongType(), True),
         T.StructField("end_snapshot_id", T.LongType(), True),
         T.StructField("row_count", T.LongType(), False),
+        # what silver_apply checks to replace the silver table (never inferred from a NULL start)
+        T.StructField("full_refresh", T.BooleanType(), False),
         # text with an offset, cast by Postgres (stringtype=unspecified on the write): a kept row
         # must keep its original time, and JDBC timestamps would depend on the JVM time zone
+        # (the JDBC write names its columns, so this order needn't match the table's)
         T.StructField("created_at", T.StringType(), False),
     ]
 )
@@ -127,11 +132,11 @@ def read_bronze(spark: SparkSession, table: str, start: int | None, end: int) ->
 def process_table(
     spark: SparkSession, cp, jdbc: dict[str, str], full_refresh: bool = False
 ) -> tuple | None:
-    """Stage one table; returns its staging.batch row, or None if bronze has no such table.
+    """Stage one table; returns its staging.batch row without `created_at`
+    (table, start, end, rows, full_refresh), or None if bronze has no such table.
 
-    `full_refresh`: ignore the checkpoint and stage the whole bronze table (start = None). The
-    batch row then has no start snapshot while the checkpoint has one, which is how
-    silver_apply recognises a full refresh and rebuilds the silver table instead of appending.
+    `full_refresh`: ignore the checkpoint and stage the whole bronze table (start = None); the
+    batch row's `full_refresh = true` tells silver_apply to replace the silver table.
     """
     target, source, keys = cp["table_name"], cp["source_table"], list(cp["key_columns"])
     start = None if full_refresh else cp["last_snapshot_id"]
@@ -144,7 +149,7 @@ def process_table(
     end = current_snapshot_id(spark, source)
     if end is None or end == start:
         log.info("%s: no new bronze snapshot since %s, nothing to stage", target, start)
-        return (target, start, start, 0)
+        return (target, start, start, 0, full_refresh)
 
     versions = events_to_versions(read_bronze(spark, source, start, end), keys).persist()
     rows = versions.count()
@@ -153,7 +158,7 @@ def process_table(
         versions.write.format("jdbc").options(**jdbc, dbtable=staging).mode("overwrite").save()
     log.info("%s: snapshots (%s, %s] -> %d version rows", target, start, end, rows)
     versions.unpersist()
-    return (target, start, end, rows)
+    return (target, start, end, rows, full_refresh)
 
 
 def select_checkpoints(checkpoints: list, table: str) -> list:
@@ -171,7 +176,9 @@ def merge_batches(existing: list[tuple], new: list[tuple], active: list[str]) ->
     """staging.batch rows to write back: `new` replaces the rows of its tables, the existing rows
     of the other active tables stay unchanged, rows of tables no longer active are dropped.
 
-    Rows are (table_name, start_snapshot_id, end_snapshot_id, row_count, created_at).
+    Rows are (table_name, start_snapshot_id, end_snapshot_id, row_count, full_refresh,
+    created_at): a kept row keeps its flag, so a full refresh still waiting for silver_apply
+    survives a run of another table.
     """
     merged = {row[0]: row for row in existing if row[0] in active}
     merged.update({row[0]: row for row in new})
@@ -185,9 +192,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--full-refresh",
         action="store_true",
-        help="ignore the checkpoint: stage the whole bronze table, silver_apply rebuilds silver",
+        help="ignore the checkpoint: stage the whole bronze table, silver_apply rebuilds silver "
+        "(one table only)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # same rule as the DAG: rebuilding every table at once is never what a by-hand run means
+    if args.full_refresh and args.table == "all":
+        parser.error("--full-refresh needs a specific --table, not 'all'")
+    return args
 
 
 def main() -> None:
@@ -232,14 +244,14 @@ def main() -> None:
         .option(
             "query",
             "SELECT table_name, start_snapshot_id, end_snapshot_id, row_count, "
-            "created_at::text AS created_at FROM staging.batch",
+            "full_refresh, created_at::text AS created_at FROM staging.batch",
         )
         .load()
         .collect()
     ]
     rows = merge_batches(existing, batches, active)
     for r in rows:
-        log.info("staging.batch: %s (%s, %s] %d rows, %s", *r)
+        log.info("staging.batch: %s (%s, %s] %d rows, full_refresh=%s, %s", *r)
     (
         spark.createDataFrame(rows, BATCH_SCHEMA)
         .write.format("jdbc")

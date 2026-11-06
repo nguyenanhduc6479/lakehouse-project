@@ -86,8 +86,9 @@ def conn(db):
     return db
 
 
-def stage(conn, rows, start, end, extra_columns=()):
-    """What one job_silver run leaves behind: staging.orders + its staging.batch row."""
+def stage(conn, rows, start, end, extra_columns=(), full_refresh=False):
+    """What one job_silver run leaves behind: staging.orders + its staging.batch row
+    (`full_refresh=True`: a `--full-refresh` run, which also stages from no start)."""
     extra = "".join(f", {name} {kind}" for name, kind, _ in extra_columns)
     conn.execute("DROP TABLE IF EXISTS staging.orders")
     conn.execute(STAGING_DDL.format(extra=extra))
@@ -100,11 +101,13 @@ def stage(conn, rows, start, end, extra_columns=()):
             [r[:3] + tuple(v for _, _, v in extra_columns) + r[3:] for r in rows],
         )
         cur.execute(
-            "INSERT INTO staging.batch (table_name, start_snapshot_id, end_snapshot_id, row_count) "
-            "VALUES ('silver.orders', %s, %s, %s) ON CONFLICT (table_name) DO UPDATE SET "
+            "INSERT INTO staging.batch "
+            "(table_name, start_snapshot_id, end_snapshot_id, row_count, full_refresh) "
+            "VALUES ('silver.orders', %s, %s, %s, %s) ON CONFLICT (table_name) DO UPDATE SET "
             "start_snapshot_id = EXCLUDED.start_snapshot_id, "
-            "end_snapshot_id = EXCLUDED.end_snapshot_id, row_count = EXCLUDED.row_count",
-            (start, end, len(rows)),
+            "end_snapshot_id = EXCLUDED.end_snapshot_id, row_count = EXCLUDED.row_count, "
+            "full_refresh = EXCLUDED.full_refresh",
+            (start, end, len(rows), full_refresh),
         )
     conn.commit()
 
@@ -183,14 +186,16 @@ def test_same_batch_again_is_skipped(conn):
     assert len(versions(conn)) == 2
 
 
-def test_first_batch_again_rebuilds_the_same_history(conn):
-    # a batch without start holds the whole bronze table: re-applying it is a full refresh
+def test_first_batch_again_is_skipped(conn):
+    # no start snapshot, like a full refresh, but not flagged as one: a plain applied batch
     stage(conn, [row(1, "pending", 100, 6, T(0), T(10)), row(1, "paid", 200, 7, T(10))], None, 1)
     apply(conn)
-    before = versions(conn)
-    assert "FULL REFRESH" in apply(conn)
-    assert versions(conn) == before
-    assert checkpoint(conn) == 1
+    stamps = conn.execute("SELECT _silver_updated_at FROM silver.orders ORDER BY _lsn").fetchall()
+    assert "already applied" in apply(conn)
+    assert (
+        conn.execute("SELECT _silver_updated_at FROM silver.orders ORDER BY _lsn").fetchall()
+        == stamps
+    )
 
 
 def test_rewound_checkpoint_replays_without_changes(conn):
@@ -280,7 +285,7 @@ def test_full_refresh_rebuilds_a_damaged_history(conn):
         row(2, "pending", 300, 8, T(20), T(30)),
         row(2, "shipped", 400, 9, T(30)),
     ]
-    stage(conn, rows, None, 3)
+    stage(conn, rows, None, 3, full_refresh=True)
     summary = apply(conn)
     assert "FULL REFRESH" in summary
     assert summary.endswith("2 old rows deleted, 4 staged, 4 inserted")
@@ -303,16 +308,33 @@ def test_full_refresh_runs_without_a_new_bronze_snapshot(conn):
     conn.execute("UPDATE silver.orders SET status = 'broken'")
     conn.commit()
     # bronze still at snapshot 2 = the checkpoint: must not be skipped as "already applied"
-    stage(conn, [row(1, "pending", 100, 6, T(0), T(10)), row(1, "paid", 200, 7, T(10))], None, 2)
+    stage(
+        conn,
+        [row(1, "pending", 100, 6, T(0), T(10)), row(1, "paid", 200, 7, T(10))],
+        None,
+        2,
+        full_refresh=True,
+    )
     assert "FULL REFRESH" in apply(conn)
     assert [r[1] for r in versions(conn)] == ["pending", "paid"]
     assert checkpoint(conn) == 2
 
 
+def test_full_refresh_is_applied_once(conn):
+    stage(conn, [row(1, "pending", 100, 6, T(0))], None, 1)
+    apply(conn)
+    stage(conn, [row(1, "pending", 100, 6, T(0))], None, 1, full_refresh=True)
+    assert "FULL REFRESH" in apply(conn)
+    flag = "SELECT full_refresh FROM staging.batch WHERE table_name = 'silver.orders'"
+    assert conn.execute(flag).fetchone() == (False,)
+    # a cleared silver_apply re-runs on the same batch row: nothing happens this time
+    assert "already applied" in apply(conn)
+
+
 def test_full_refresh_that_fails_leaves_silver_untouched(conn):
     stage(conn, [row(1, "pending", 100, 6, T(0))], None, 1)
     apply(conn)
-    stage(conn, [row(1, "paid", 200, 7, T(10))], None, 2)
+    stage(conn, [row(1, "paid", 200, 7, T(10))], None, 2, full_refresh=True)
     conn.execute("DROP TABLE staging.orders")  # batch says 1 row, staging table is gone
     conn.commit()
     with pytest.raises(RuntimeError, match="staging.orders is missing"):
@@ -324,7 +346,7 @@ def test_full_refresh_that_fails_leaves_silver_untouched(conn):
 def test_full_refresh_without_a_bronze_snapshot_is_refused(conn):
     stage(conn, [row(1, "pending", 100, 6, T(0))], None, 1)
     apply(conn)
-    stage(conn, [], None, None)  # bronze table recreated empty
+    stage(conn, [], None, None, full_refresh=True)  # bronze table recreated empty
     with pytest.raises(RuntimeError, match="refusing to empty silver"):
         apply(conn)
     assert len(versions(conn)) == 1

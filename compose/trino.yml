@@ -30,6 +30,10 @@ services:
     ports: ["8080:8080"]
     volumes:
       - ../trino/catalog:/etc/trino/catalog
+      # the image's own jvm.config with a fixed heap: its default -XX:MaxRAMPercentage=80 sized the
+      # heap from the whole WSL VM (~12 GB max) and the JVM kept ~4.4 GB for a few small queries.
+      # Mounted as one file; after editing: docker compose up -d --force-recreate trino
+      - ../trino/jvm.config:/etc/trino/jvm.config:ro
     depends_on:
       polaris:
         condition: service_healthy

@@ -560,6 +560,23 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   Verified: `silver.users` damaged (current names overwritten, 6 old versions deleted) → full
   refresh → history identical byte for byte to before (516 rows), verify OK, = source; `all` +
   `full_refresh` refused; the next run without conf was incremental.
+  Review fix (same day): the apply first *inferred* a full refresh from "no start snapshot while
+  the checkpoint is set" — also true of a table's very first batch when re-applied, and
+  `merge_batches` can keep that row for days; a lone re-run of `silver_apply` would then silently
+  rebuild the table and give every row a new `_silver_updated_at` (later read by gold/ES as "all
+  changed"). Now the request is explicit: column **`staging.batch.full_refresh`** (`boolean NOT
+  NULL DEFAULT false`, `ALTER ... ADD COLUMN IF NOT EXISTS` for existing DBs), written by the Spark
+  job, read by the apply and **set back to false in the rebuild's transaction** (applied once — a
+  flag left on would just move the problem to the full-refresh row). `job_silver.py` also refuses
+  `--full-refresh` with `--table all` (a by-hand `spark-submit` skipped the DAG's check).
+  Tests: first batch re-applied → "already applied", `_silver_updated_at` unchanged; full refresh
+  applied once; CLI refusal; a pending flag survives `merge_batches`. Verified on the stack:
+  migration on the live DB, full refresh `users` (516 deleted / 516 inserted, flag cleared), then
+  clearing only `silver_apply` → "batch already applied", `_silver_updated_at` unchanged.
+- Lesson: **state a request, don't infer it from a coincidence of values.** "No start snapshot"
+  meant two things (first batch, full refresh); the inference was correct on the data but fired
+  a heavy operation no one asked for. An explicit flag that is consumed by the step acting on it
+  makes a retry harmless.
 - Lesson: **a grouping rule applied per batch is only correct if a batch boundary can't cut the
   group.** Here batches are cut by the sink's commits, which know nothing about source
   transactions — so the rule had to be finished across batches in the apply. Test the boundary,
@@ -605,6 +622,11 @@ gold — no dashboards yet.
   Re-verified: fresh volume healthy after 73 s, restart after 52 s with "exists, resetting its
   password", SQL Lab still sees gold; the old `superset` DB and role were dropped.)*
 - [ ] Incremental gold with the `_silver_updated_at` watermark (`ReplacingMergeTree`, design §8).
+  **Pass a silver full refresh on:** it can remove keys and versions silver used to have, and an
+  incremental model (append + `ReplacingMergeTree`) only ever adds rows — it never drops a key
+  that left silver. With `full_refresh` on, `gold_dbt_run` must run `dbt run --full-refresh
+  --select <models built from that table>+` (today gold is rebuilt in full every run, so it's
+  fine for now). Same for ES in phase 7.
 - [ ] More models: `dim_date`, `fct_order_lines`, marts (revenue per day / per city).
 - [x] Review fixes (2026-11-06):
   - **Dashboards in git.** Superset's metadata is a SQLite file on a volume, so `down -v` would
@@ -667,7 +689,9 @@ all healthy (Loki has no healthcheck); ClickHouse and Superset logs reach Loki.
 
 - [ ] Task `sync_es` in `platform_pipeline` (parallel with dbt): build one document per order,
   rebuild orders whose row, lines or user changed, delete orders that became `_is_deleted`;
-  `elasticsearch` client 7.x.
+  `elasticsearch` client 7.x. After a silver `full_refresh`, rebuild the whole index of what
+  that table feeds instead of syncing by watermark: every row looks changed, and orders that left
+  silver would never be deleted (see the phase 6 incremental item).
 - [ ] FastAPI service: `GET /search?q=` (ES), `GET /orders/{id}` and `/orders/{id}/history`
   (silver), `GET /stats/...` (gold).
 - [ ] A single static HTML page served by the API.
@@ -683,7 +707,10 @@ all healthy (Loki has no healthcheck); ClickHouse and Superset logs reach Loki.
 
 - [ ] DAG `platform_maintenance` (`schedule=None`): Iceberg compaction / expire snapshots (never
   past the silver checkpoint) / remove orphan files; source-vs-silver row-count check; replication
-  slot lag.
+  slot lag. Runbook entry — **recovery when the checkpoint snapshot was expired by mistake**: the
+  incremental read fails (it walks the snapshot chain back to the checkpoint), but
+  `full_refresh` for that table reads only the current snapshot and needs no old one; it also
+  moves the checkpoint to the current snapshot. Test it as a scenario.
 - [ ] Run every scenario in design §10 and record what happened in the README — including the
   ones added by the phase 5 review: new-column types in silver, silver after bronze compaction,
   re-snapshot while the generator runs.
