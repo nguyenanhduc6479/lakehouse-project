@@ -581,12 +581,16 @@ gold — chưa làm dashboard.
   `dim_users_matches_silver` (số dòng gold = silver).
 - [x] DAG: `silver_verify` → **`gold_dbt_run`** → **`gold_dbt_test`** (`BashOperator`); tham số
   `table` chỉ giới hạn các task silver.
-- [x] **Superset 6.1.0** (`superset/Dockerfile`: + `clickhouse-connect` 0.15.1 và `psycopg2-binary`
-  2.9.13 — image gốc không có driver nào), module `compose/superset.yml`, cổng host **8088**.
-  Metadata trong DB Postgres `superset` (role `superset`, do `postgres-setup` tạo); job one-shot
-  `superset-init` (`superset/scripts/init.sh`, idempotent: `db upgrade`, tạo admin hoặc đặt lại mật
-  khẩu theo `.env`, `superset init`, `set-database-uri` cho **ClickHouse gold** bằng
-  `superset_reader`). Không Redis/Celery.
+- [x] **Superset 6.1.0** (`superset/Dockerfile`: + `clickhouse-connect` 0.15.1 — image gốc không có
+  driver nào), module `compose/superset.yml`, cổng host **8088**, một service duy nhất: metadata trong
+  **SQLite** trên `superset_home_vol`, và command của nó chạy `superset/scripts/init.sh` (idempotent:
+  `db upgrade`, tạo admin hoặc đặt lại mật khẩu theo `.env`, `superset init`, `set-database-uri` cho
+  **ClickHouse gold** bằng `superset_reader`) trước server. Không Redis/Celery. *(Review
+  2026-11-06: ban đầu dựng với metadata DB trên Postgres + job one-shot `superset-init`; chuyển sang
+  SQLite và một service — bỏ DB/role Postgres, bớt 3 biến `.env`, bỏ `psycopg2`, bớt một container.
+  SQLite không dành cho production; đủ cho một người dùng. Kiểm tra lại: volume trống healthy sau
+  73 giây, khởi động lại sau 52 giây với "exists, resetting its password", SQL Lab vẫn thấy gold; DB
+  và role `superset` cũ đã được xóa.)*
 - [ ] Gold incremental với watermark `_silver_updated_at` (`ReplacingMergeTree`, design §8).
 - [ ] Thêm model: `dim_date`, `fct_order_lines`, mart (doanh thu theo ngày / theo thành phố).
 - [ ] Dataset Superset + một dashboard (doanh thu theo ngày và theo thành phố).
@@ -594,7 +598,7 @@ gold — chưa làm dashboard.
 **Đã kiểm tra 2026-11-06:** `clickhouse_reader` đọc được silver và không gì khác; ClickHouse đọc
 silver qua `silver_pg` với giá trị và thời gian khớp (1167 = nguồn); `superset_reader` không tạo
 được gì và chỉ thấy schema `gold`; Superset (REST API) liệt kê `gold.dim_users` / `gold.fct_orders`
-và chạy được truy vấn SQL Lab (số đơn và doanh thu theo ngày); chạy lại `superset-init` → "exists,
+và chạy được truy vấn SQL Lab (số đơn và doanh thu theo ngày); chạy lại init → "exists,
 resetting its password". End to end: generator 1 phút → DAG 5 task `success`, `dbt run` 2 model,
 `dbt test` 8/8 PASS, gold = nguồn (1217 order, 221 user). 29 container, tất cả healthy (Loki không có
 healthcheck); log ClickHouse và Superset lên Loki.

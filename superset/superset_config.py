@@ -8,12 +8,10 @@ import os
 
 SECRET_KEY = os.environ["SUPERSET_SECRET_KEY"]
 
-# metadata DB: Postgres `superset`, owned by role `superset` (created by postgres-setup)
-SQLALCHEMY_DATABASE_URI = "postgresql+psycopg2://{user}:{password}@postgres:5432/{db}".format(
-    user=os.environ["SUPERSET_DB_USERNAME"],
-    password=os.environ["SUPERSET_DB_PASSWORD"],
-    db=os.environ["POSTGRES_DB_SUPERSET"],
-)
+# Metadata (users, database entries, charts, dashboards) in SQLite on the volume superset_home_vol.
+# Superset's docs advise against SQLite in production (one writer at a time); this is a
+# single-user local demo, so it is enough and keeps Superset independent of Postgres.
+SQLALCHEMY_DATABASE_URI = "sqlite:////app/superset_home/superset.db"
 
 CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 300}
 DATA_CACHE_CONFIG = CACHE_CONFIG

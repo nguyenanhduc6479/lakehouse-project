@@ -87,14 +87,6 @@ else
     echo "warning: missing polaris vars."
 fi
 
-# 2.3. superset (metadata DB)
-if [ -n "$SUPERSET_DB_USERNAME" ] && [ -n "$POSTGRES_DB_SUPERSET" ] && [ -n "$SUPERSET_DB_PASSWORD" ]; then
-    create_login "$SUPERSET_DB_USERNAME" "$SUPERSET_DB_PASSWORD"
-    create_database "$POSTGRES_DB_SUPERSET" "$SUPERSET_DB_USERNAME"
-else
-    echo "warning: missing superset vars."
-fi
-
 # 3. data-platform DB: config + silver schemas (idempotent DDL)
 echo "applying /postgres/schema.sql to database '$PGDATABASE'..."
 output=$(psql -X -q -v ON_ERROR_STOP=1 -h postgres -f /postgres/schema.sql 2>&1)

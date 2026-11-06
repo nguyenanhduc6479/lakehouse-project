@@ -69,7 +69,7 @@ OLAP engine (MergeTree, background merges, `FINAL`, incremental loads from an ex
 | Postgres (silver, Postgres 16) | Silver tables, also the web app's database | Database `data-platform` (`POSTGRES_DB`) on the existing `postgres` service, next to `airflow` and `polaris`; Airflow reaches it as `postgres_conn` |
 | ClickHouse | Gold (OLAP): stores the gold tables, serves Superset and the API | 26.8 LTS, single node, HTTP 8123; users `admin` (dbt) and `superset_reader` (SELECT on `gold.*`); reads silver through the named collection `silver_pg` as the read-only Postgres role `clickhouse_reader` |
 | dbt-clickhouse | Silver → gold | dbt-core 1.12 + dbt-clickhouse 1.10 in their own virtualenv in the Airflow image (`/opt/airflow/dbt-venv`, `airflow/dbt-requirements.txt`) — kept out of Airflow's constraints; project `./dbt` |
-| Superset | Dashboards | 6.1, custom image adding `clickhouse-connect` + `psycopg2` (the stock image has no driver); metadata in Postgres DB `superset`; one-shot `superset-init` registers **ClickHouse gold** |
+| Superset | Dashboards | 6.1, custom image adding `clickhouse-connect` (the stock image has no driver); metadata in SQLite on a volume (single user — not a production setup); its start script registers **ClickHouse gold** |
 | Elasticsearch 7.17 | Search for the web app | Already in `compose/infra.yml`; Python client must be `elasticsearch` 7.x (8.x refuses a 7.x server) |
 | FastAPI | The web app's only read path | ES for search, silver for detail/history, gold for numbers |
 | Airflow | Orchestrates the batch steps | Manual trigger only; runs light tasks itself (SQL on Postgres, the ES sync); heavy transforms run in Spark and dbt |

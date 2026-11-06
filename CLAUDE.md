@@ -149,12 +149,15 @@ the others by service name. All credentials and tunables live in `.env` and are 
   `users.d/superset_reader.xml` (`SUPERSET_READER_PASSWORD`, `GRANT SELECT ON gold.*`). The
   `Listen [::]... failed` warnings at start are harmless (no IPv6 on the network).
   **Superset 6.1.0** (`compose/superset.yml`, `custom-superset:6.1.0` from `superset/Dockerfile`:
-  + `clickhouse-connect` 0.15.1, `psycopg2-binary` 2.9.13 — the stock image has no driver), host
-  port **8088**, config `superset/superset_config.py` (env only; no Redis/Celery). Metadata in
-  Postgres DB `superset` (role `superset`, `SUPERSET_DB_*`, created by `postgres-setup`). One-shot
-  `superset-init` (`superset/scripts/init.sh`, idempotent): `db upgrade`, admin
+  + `clickhouse-connect` 0.15.1 — the stock image has no driver; baked in, not pip-installed at
+  start), host port **8088**, config `superset/superset_config.py` (env only; no Redis/Celery).
+  Metadata in **SQLite** on volume `superset_home_vol` (`/app/superset_home/superset.db`; not for
+  production per Superset's docs, enough for one user — Superset doesn't depend on Postgres).
+  One service: its `command` runs `superset/scripts/init.sh` (idempotent: `db upgrade`, admin
   `SUPERSET_ADMIN_USER` created or its password reset to `.env`, `superset init`,
-  `set-database-uri` **ClickHouse gold** as `superset_reader`. No datasets/dashboards yet.
+  `set-database-uri` **ClickHouse gold** as `superset_reader`) then `exec`s the image's
+  `/app/docker/entrypoints/run-server.sh`; healthy after ~70 s on an empty volume, ~50 s on a
+  restart. No datasets/dashboards yet.
 - **CDC** (`compose/connect.yml`): **Kafka Connect** `custom-connect:7.6.0` from `connect/Dockerfile`
   (`cp-kafka-connect:7.6.0` + **Debezium Postgres 2.7.4.Final**, Maven Central tarball, SHA-1
   checked — the image runs **Java 11**, so Debezium 3.x (Java 17) is out). Multi-stage: stage

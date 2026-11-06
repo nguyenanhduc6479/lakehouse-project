@@ -7,7 +7,7 @@ Inside the Docker network every service is reached by its service name (e.g. `ka
 `http://polaris:8181`), not `localhost`. From Windows (DataGrip, browser) the host ports below are
 reachable on `localhost` too: Docker Engine runs inside WSL and WSL2 forwards published ports.
 
-The stack has 28 services: 20 long-running ones and 8 one-shot jobs (see the end of this page), plus
+The stack has 27 services: 20 long-running ones and 7 one-shot jobs (see the end of this page), plus
 the on-demand `generator`.
 
 ## Services with a UI
@@ -95,8 +95,9 @@ than closing WSL with the stack running.
 Run once at startup and exit; they have no port and no UI: `postgres-setup`, `source-db-setup`
 (applies `source/schema.sql`), `rustfs-setup`,
 `polaris-bootstrap`, `polaris-setup`, `airflow-init`, `connect-setup` (registers
-`connect/connectors/*.json` with Kafka Connect and waits until they are `RUNNING`), `superset-init`
-(metadata DB migration, admin user, roles, the **ClickHouse gold** database entry).
+`connect/connectors/*.json` with Kafka Connect and waits until they are `RUNNING`). Superset has no
+separate job: its container runs `superset/scripts/init.sh` (metadata migration, admin user, roles,
+the **ClickHouse gold** database entry) before starting the web server.
 `airflow-scheduler` is a long-running backend process, also without a UI or port.
 
 ## On demand (compose profile `generator`)

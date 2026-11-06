@@ -1,5 +1,7 @@
-# Superset: dashboards on gold (ClickHouse). Metadata in Postgres DB `superset`; reads ClickHouse as
-# the read-only user superset_reader. Single gunicorn server, no Redis/Celery (demo scale).
+# Superset: dashboards on gold (ClickHouse), read as the read-only user superset_reader.
+# Metadata in SQLite on superset_home_vol (see superset/superset_config.py); single gunicorn
+# server, no Redis/Celery (demo scale). superset/scripts/init.sh (idempotent) runs before the
+# server at every start, so there is no separate one-shot job.
 # Logging for every container in this module: json-file (the Engine default) plus the compose
 # labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
 # which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
@@ -11,60 +13,45 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
-x-superset-common: &superset-common
-  build:
-    context: ../superset
-    dockerfile: Dockerfile
-  image: custom-superset:6.1.0
-  environment: &superset-env
-    SUPERSET_CONFIG_PATH: /app/superset_config.py
-    SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
-    POSTGRES_DB_SUPERSET: ${POSTGRES_DB_SUPERSET}
-    SUPERSET_DB_USERNAME: ${SUPERSET_DB_USERNAME}
-    SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD}
-  networks: [lakehouse]
-
 services:
-  # One-shot: metadata DB migration, admin user, roles, ClickHouse database entry (idempotent).
-  superset-init:
-    <<: *superset-common
-    container_name: superset-init
-    logging: *default-logging
-    depends_on:
-      postgres-setup:
-        condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
-    environment:
-      <<: *superset-env
-      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
-      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
-      SUPERSET_READER_PASSWORD: ${SUPERSET_READER_PASSWORD}
-    volumes:
-      - ../superset/superset_config.py:/app/superset_config.py:ro
-      - ../superset/scripts:/scripts:ro
-    entrypoint: ["bash", "/scripts/init.sh"]
-
   superset:
-    <<: *superset-common
+    build:
+      context: ../superset
+      dockerfile: Dockerfile
+    image: custom-superset:6.1.0
     container_name: superset
     logging: *default-logging
     depends_on:
-      superset-init:
-        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
     environment:
-      <<: *superset-env
+      SUPERSET_CONFIG_PATH: /app/superset_config.py
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      SUPERSET_READER_PASSWORD: ${SUPERSET_READER_PASSWORD}
       TZ: ${TZ}
+    # init (migrations, admin, database entry), then exec the image's own server script (gunicorn)
+    command: ["bash", "-c", "bash /scripts/init.sh && exec /app/docker/entrypoints/run-server.sh"]
     volumes:
       - ../superset/superset_config.py:/app/superset_config.py:ro
+      - ../superset/scripts:/scripts:ro
+      # SQLite metadata DB; the image creates /app/superset_home owned by superset, so a fresh
+      # volume inherits the right owner
+      - superset_home_vol:/app/superset_home
     ports: ["8088:8088"]
+    networks: [lakehouse]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8088/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      # init runs first: ~40 s on an empty volume (all migrations), ~20 s afterwards
+      start_period: 120s
       start_interval: 3s
+
+volumes:
+  superset_home_vol:
 
 networks:
   lakehouse:

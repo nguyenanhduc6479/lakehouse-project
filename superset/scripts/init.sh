@@ -1,6 +1,7 @@
 #!/bin/bash
-# One-shot superset-init: migrate the metadata DB, ensure the admin user, sync roles/permissions
-# and register the ClickHouse gold database (read-only user superset_reader). Idempotent.
+# Runs at every start of the superset container, before the web server (compose/superset.yml):
+# migrate the metadata DB (SQLite), ensure the admin user, sync roles/permissions and register the
+# ClickHouse gold database (read-only user superset_reader). Idempotent: a re-run only re-checks.
 set -euo pipefail
 
 echo "migrating the metadata DB..."

@@ -580,12 +580,16 @@ gold — no dashboards yet.
   `dim_users_matches_silver` (gold count = silver count).
 - [x] DAG: `silver_verify` → **`gold_dbt_run`** → **`gold_dbt_test`** (`BashOperator`); the
   `table` param limits only the silver tasks.
-- [x] **Superset 6.1.0** (`superset/Dockerfile`: + `clickhouse-connect` 0.15.1 and
-  `psycopg2-binary` 2.9.13 — the stock image ships no driver), module `compose/superset.yml`, host
-  port **8088**. Metadata in Postgres DB `superset` (role `superset`, created by `postgres-setup`);
-  one-shot `superset-init` (`superset/scripts/init.sh`, idempotent: `db upgrade`, admin user
-  created or its password reset to `.env`, `superset init`, `set-database-uri` for **ClickHouse
-  gold** as `superset_reader`). No Redis/Celery.
+- [x] **Superset 6.1.0** (`superset/Dockerfile`: + `clickhouse-connect` 0.15.1 — the stock image
+  ships no driver), module `compose/superset.yml`, host port **8088**, one service: metadata in
+  **SQLite** on `superset_home_vol`, and its command runs `superset/scripts/init.sh` (idempotent:
+  `db upgrade`, admin user created or its password reset to `.env`, `superset init`,
+  `set-database-uri` for **ClickHouse gold** as `superset_reader`) before the server. No
+  Redis/Celery. *(Review 2026-11-06: first built with a Postgres metadata DB + a one-shot
+  `superset-init`; moved to SQLite and one service — no Postgres DB/role, 3 fewer `.env`
+  variables, no `psycopg2`, one container less. SQLite is not for production; fine for one user.
+  Re-verified: fresh volume healthy after 73 s, restart after 52 s with "exists, resetting its
+  password", SQL Lab still sees gold; the old `superset` DB and role were dropped.)*
 - [ ] Incremental gold with the `_silver_updated_at` watermark (`ReplacingMergeTree`, design §8).
 - [ ] More models: `dim_date`, `fct_order_lines`, marts (revenue per day / per city).
 - [ ] Superset datasets + one dashboard (revenue per day and per city).
@@ -593,7 +597,7 @@ gold — no dashboards yet.
 **Verified 2026-11-06:** `clickhouse_reader` reads silver and nothing else; ClickHouse reads
 silver through `silver_pg` with matching values and times (1167 = source); `superset_reader`
 can't create anything and only sees schema `gold`; Superset (REST API) lists `gold.dim_users` /
-`gold.fct_orders` and runs a SQL Lab query (orders and revenue per day); `superset-init` re-run →
+`gold.fct_orders` and runs a SQL Lab query (orders and revenue per day); init re-run →
 "exists, resetting its password". End to end: generator 1 min → DAG with 5 tasks `success`,
 `dbt run` 2 models, `dbt test` 8/8 PASS, gold = source (1217 orders, 221 users). 29 containers,
 all healthy (Loki has no healthcheck); ClickHouse and Superset logs reach Loki.
