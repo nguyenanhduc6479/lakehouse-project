@@ -31,11 +31,15 @@ services:
       SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
       SUPERSET_READER_PASSWORD: ${SUPERSET_READER_PASSWORD}
       TZ: ${TZ}
-    # init (migrations, admin, database entry), then exec the image's own server script (gunicorn)
+    # init (migrations, admin, database entry, dashboards from git), then exec the image's own
+    # server script (gunicorn). No restart policy: if init fails the container stays exited —
+    # read `docker compose logs superset` first
     command: ["bash", "-c", "bash /scripts/init.sh && exec /app/docker/entrypoints/run-server.sh"]
     volumes:
       - ../superset/superset_config.py:/app/superset_config.py:ro
       - ../superset/scripts:/scripts:ro
+      # dashboards kept in git (unzipped export bundle), imported by scripts/bootstrap.py
+      - ../superset/dashboards:/dashboards:ro
       # SQLite metadata DB; the image creates /app/superset_home owned by superset, so a fresh
       # volume inherits the right owner
       - superset_home_vol:/app/superset_home

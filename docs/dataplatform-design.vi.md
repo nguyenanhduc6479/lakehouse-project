@@ -73,7 +73,7 @@ nguồn bên ngoài).
 | Postgres (silver, Postgres 16) | Các bảng silver, đồng thời là database của web app | Database `data-platform` (`POSTGRES_DB`) trên service `postgres` hiện có, bên cạnh `airflow` và `polaris`; Airflow kết nối tới nó qua `postgres_conn` |
 | ClickHouse | Gold (OLAP): lưu các bảng gold, phục vụ Superset và API | 26.8 LTS, một node, HTTP 8123; user `admin` (dbt) và `superset_reader` (SELECT trên `gold.*`); đọc silver qua named collection `silver_pg` bằng role Postgres chỉ đọc `clickhouse_reader` |
 | dbt-clickhouse | Silver → gold | dbt-core 1.12 + dbt-clickhouse 1.10 trong virtualenv riêng của image Airflow (`/opt/airflow/dbt-venv`, `airflow/dbt-requirements.txt`) — tách khỏi constraints của Airflow; project `./dbt` |
-| Superset | Dashboard | 6.1, image tự build thêm `clickhouse-connect` (image gốc không có driver nào); metadata trong SQLite trên một volume (một người dùng — không phải cấu hình production); script khởi động của nó đăng ký **ClickHouse gold** |
+| Superset | Dashboard | 6.1, image tự build thêm `clickhouse-connect` (image gốc không có driver nào); metadata trong SQLite trên một volume (một người dùng — không phải cấu hình production); script khởi động của nó đăng ký **ClickHouse gold** (uuid cố định) và import các dashboard lưu trong git (`superset/dashboards/`) |
 | Elasticsearch 7.17 | Tìm kiếm cho web app | Đã có trong `compose/infra.yml`; Python client phải là `elasticsearch` 7.x (8.x từ chối server 7.x) |
 | FastAPI | Đường đọc duy nhất của web app | ES cho tìm kiếm, silver cho chi tiết/lịch sử, gold cho số liệu |
 | Airflow | Điều phối các bước batch | Chỉ kích hoạt thủ công; tự chạy các task nhẹ (SQL trên Postgres, ES sync); các transform nặng chạy trong Spark và dbt |

@@ -585,7 +585,7 @@ gold — chưa làm dashboard.
   driver nào), module `compose/superset.yml`, cổng host **8088**, một service duy nhất: metadata trong
   **SQLite** trên `superset_home_vol`, và command của nó chạy `superset/scripts/init.sh` (idempotent:
   `db upgrade`, tạo admin hoặc đặt lại mật khẩu theo `.env`, `superset init`, `set-database-uri` cho
-  **ClickHouse gold** bằng `superset_reader`) trước server. Không Redis/Celery. *(Review
+  **ClickHouse gold** bằng `superset_reader` — sau đó thay bằng `bootstrap.py`, xem phần sửa theo review bên dưới) trước server. Không Redis/Celery. *(Review
   2026-11-06: ban đầu dựng với metadata DB trên Postgres + job one-shot `superset-init`; chuyển sang
   SQLite và một service — bỏ DB/role Postgres, bớt 3 biến `.env`, bỏ `psycopg2`, bớt một container.
   SQLite không dành cho production; đủ cho một người dùng. Kiểm tra lại: volume trống healthy sau
@@ -593,7 +593,26 @@ gold — chưa làm dashboard.
   và role `superset` cũ đã được xóa.)*
 - [ ] Gold incremental với watermark `_silver_updated_at` (`ReplacingMergeTree`, design §8).
 - [ ] Thêm model: `dim_date`, `fct_order_lines`, mart (doanh thu theo ngày / theo thành phố).
-- [ ] Dataset Superset + một dashboard (doanh thu theo ngày và theo thành phố).
+- [x] Sửa theo review (2026-11-06):
+  - **Dashboard nằm trong git.** Metadata của Superset là một file SQLite trên volume, nên
+    `down -v` sẽ mất mọi dataset/chart/dashboard. `superset/export-dashboards.sh` (chạy trên host)
+    export chúng thành YAML thường vào `superset/dashboards/`; mỗi lần khởi động
+    `superset/scripts/bootstrap.py` import các dashboard **chưa có** trong metadata DB (dashboard đã
+    có thì giữ nguyên: chỉnh sửa trên UI còn sau mỗi lần bật máy — lệnh CLI `import-dashboards` gốc
+    luôn ghi đè). Nó cũng thay `set-database-uri`: database **ClickHouse gold** giờ có **uuid cố
+    định**, vì bản export mang password đã bị che và importer chỉ chấp nhận khi uuid của database đã
+    tồn tại (với uuid ngẫu nhiên của `set-database-uri`, import trên volume rỗng lỗi "Must provide a
+    password for the database" và làm Superset dừng).
+  - `superset_reader` có profile ClickHouse riêng: `readonly=2` (clickhouse-connect gửi setting kèm
+    truy vấn; `readonly=1` sẽ từ chối), `max_execution_time` 60 giây, `max_memory_usage` ~2 GB, cả hai
+    bị chặn trần bằng constraint (truy vấn hạ được, không nâng được, không tắt được `readonly`).
+  - `airflow-scheduler` không còn chờ ClickHouse: ClickHouse lỗi thì silver vẫn phải chạy;
+    `gold_dbt_run` khi đó fail sau vài giây với lỗi rõ ràng (`Failed to resolve 'clickhouse'`).
+  - Password của Superset được URL-encode trong URI kết nối (`.env.example` có ghi chú).
+  - Không đổi: review lo `set-database-uri` fail khi ClickHouse đang khởi động — lệnh này chỉ ghi URI
+    vào metadata DB, không hề kết nối.
+- [ ] Dataset Superset + một dashboard (doanh thu theo ngày và theo thành phố), export vào
+  `superset/dashboards/`.
 
 **Đã kiểm tra 2026-11-06:** `clickhouse_reader` đọc được silver và không gì khác; ClickHouse đọc
 silver qua `silver_pg` với giá trị và thời gian khớp (1167 = nguồn); `superset_reader` không tạo
@@ -614,11 +633,16 @@ healthcheck); log ClickHouse và Superset lên Loki.
 - `config.d/docker_related_config.xml` của image chứa `listen_host` — mount từng file cấu hình, không
   mount cả thư mục. Cảnh báo `Listen [::]... failed` là vô hại (mạng Docker không có IPv6).
 - `dbt debug` fail ở bước kiểm tra `git` (image không có git) — chỉ cần khi dùng dbt packages.
+- Dashboard dạng code, thử với một dashboard tạm (đã xóa): export, xóa volume Superset, khởi động
+  lại → database được tạo với uuid cố định, dashboard được import, truy vấn qua dataset đã import trả
+  về 1217 (password còn nguyên); đổi tên trên UI rồi khởi động lại → "all 1 dashboard(s) exist, kept
+  as they are", tên mới được giữ. Healthy 60 giây sau khi khởi động trên volume rỗng.
 
 **Hoàn thành khi:**
 - `dbt run` và `dbt test` chạy qua trong DAG.
 - `SELECT count() FROM gold.fct_orders FINAL` khớp với số đơn hiện hành, chưa bị xóa trong silver.
-- Dashboard Superset hiện doanh thu theo ngày và theo thành phố.
+- Dashboard Superset hiện doanh thu theo ngày và theo thành phố, và tự quay lại trên một volume
+  Superset rỗng (import từ `superset/dashboards/`).
 
 ## Phase 7 — Search + API
 

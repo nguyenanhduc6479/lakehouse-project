@@ -36,7 +36,7 @@ Backend services: no web UI, reached with a client (`psql`, S3 client, HTTP API,
 | Spark master RPC | 7077 | `spark://localhost:7077` | |
 | Spark master REST | 6066 | `http://localhost:6066` | Cluster-mode submit (used by Airflow) |
 | Trino (client) | 8080 | `docker exec trino trino` | Same port as the web UI |
-| ClickHouse (HTTP) | 8123 | `http://localhost:8123` (DataGrip: ClickHouse driver, port 8123) or `docker exec clickhouse clickhouse-client -u admin --password $CLICKHOUSE_ADMIN_PASSWORD` | Users: `admin` / `CLICKHOUSE_ADMIN_PASSWORD` (dbt), `superset_reader` / `SUPERSET_READER_PASSWORD` (SELECT on `gold.*`). The native port 9000 is internal only (9000 on the host is RustFS) |
+| ClickHouse (HTTP) | 8123 | `http://localhost:8123` (DataGrip: ClickHouse driver, port 8123) or `docker exec clickhouse clickhouse-client -u admin --password $CLICKHOUSE_ADMIN_PASSWORD` | Users: `admin` / `CLICKHOUSE_ADMIN_PASSWORD` (dbt), `superset_reader` / `SUPERSET_READER_PASSWORD` (SELECT on `gold.*`; profile `readonly=2`, 60 s / ~2 GB per query). The native port 9000 is internal only (9000 on the host is RustFS) |
 
 ## Services without a UI — internal only
 
@@ -88,7 +88,10 @@ setup, to be restored on an always-on server; see CLAUDE.md → Conventions): ru
 and the setup jobs re-run (idempotent). Debezium resumes from its slot, the sink from its Kafka
 offsets, silver from `config.etl_checkpoint`. Check: every service healthy except Loki (no
 healthcheck), both connectors `RUNNING`. Before shutting down, `docker compose stop` is cleaner
-than closing WSL with the stack running.
+than closing WSL with the stack running. After an unclean shutdown (WSL closed with the stack
+running), also check that `kafka-connect` is up with both connectors `RUNNING` and that the
+replication slot is `active` with a small lag ("Checking CDC" below); if Superset is not up, read
+`docker compose logs superset` first (its init runs before the server, and nothing restarts it).
 
 ## One-shot jobs
 
@@ -388,7 +391,23 @@ SELECT count() FROM postgresql(silver_pg, table = 'orders') WHERE _is_current AN
 ```
 
 From Superset: SQL Lab → database **ClickHouse gold** → schema `gold` (the only one
-`superset_reader` sees) → `dim_users`, `fct_orders`. Dashboards come later.
+`superset_reader` sees) → `dim_users`, `fct_orders`.
+
+### Superset dashboards in git
+
+Superset's metadata (datasets, charts, dashboards) lives in SQLite on `superset_home_vol`; the
+copy in git is `superset/dashboards/` (an unzipped export bundle, plain YAML, passwords masked).
+
+```bash
+bash superset/export-dashboards.sh      # after editing in the UI: export all, then review + commit
+git diff superset/dashboards
+```
+
+At every start, `superset/scripts/bootstrap.py` imports the dashboards that are missing (log:
+`imported N dashboard(s)` / `all N dashboard(s) exist, kept as they are`), so an empty volume gets
+everything back and UI edits survive a restart. To apply a changed bundle to a dashboard that
+exists: delete it in the UI, then `docker compose restart superset`. The database entry
+**ClickHouse gold** has a fixed uuid (`DB_UUID` in `bootstrap.py`) that the exports point at.
 
 Run dbt by hand (inside the scheduler, same environment as the DAG):
 

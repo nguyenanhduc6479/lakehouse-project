@@ -584,7 +584,7 @@ gold — no dashboards yet.
   ships no driver), module `compose/superset.yml`, host port **8088**, one service: metadata in
   **SQLite** on `superset_home_vol`, and its command runs `superset/scripts/init.sh` (idempotent:
   `db upgrade`, admin user created or its password reset to `.env`, `superset init`,
-  `set-database-uri` for **ClickHouse gold** as `superset_reader`) before the server. No
+  `set-database-uri` for **ClickHouse gold** as `superset_reader` — since replaced by `bootstrap.py`, see the review fixes below) before the server. No
   Redis/Celery. *(Review 2026-11-06: first built with a Postgres metadata DB + a one-shot
   `superset-init`; moved to SQLite and one service — no Postgres DB/role, 3 fewer `.env`
   variables, no `psycopg2`, one container less. SQLite is not for production; fine for one user.
@@ -592,7 +592,27 @@ gold — no dashboards yet.
   password", SQL Lab still sees gold; the old `superset` DB and role were dropped.)*
 - [ ] Incremental gold with the `_silver_updated_at` watermark (`ReplacingMergeTree`, design §8).
 - [ ] More models: `dim_date`, `fct_order_lines`, marts (revenue per day / per city).
-- [ ] Superset datasets + one dashboard (revenue per day and per city).
+- [x] Review fixes (2026-11-06):
+  - **Dashboards in git.** Superset's metadata is a SQLite file on a volume, so `down -v` would
+    lose every dataset/chart/dashboard. `superset/export-dashboards.sh` (host) exports them as
+    plain YAML into `superset/dashboards/`; at every start `superset/scripts/bootstrap.py`
+    imports the dashboards **missing** from the metadata DB (existing ones are left alone: UI
+    edits survive the daily restart — the stock `import-dashboards` CLI always overwrites). It
+    also replaces `set-database-uri`: the database **ClickHouse gold** now has a **fixed uuid**,
+    because exports carry the password masked and the importer only accepts that when the
+    database uuid already exists (with `set-database-uri`'s random uuid, an import on an empty
+    volume failed with "Must provide a password for the database" and stopped Superset).
+  - `superset_reader` has its own ClickHouse profile: `readonly=2` (clickhouse-connect sends
+    settings with its queries; `readonly=1` would reject them), `max_execution_time` 60 s,
+    `max_memory_usage` ~2 GB, both capped by constraints (a query can lower them, not raise them,
+    nor turn `readonly` off).
+  - `airflow-scheduler` no longer waits for ClickHouse: a ClickHouse outage must not stop silver;
+    `gold_dbt_run` then fails in seconds with a clear error (`Failed to resolve 'clickhouse'`).
+  - The Superset password is URL-encoded in the connection URI (`.env.example` notes it).
+  - Not changed: the review feared `set-database-uri` failing while ClickHouse starts — it only
+    writes the URI into the metadata DB, it never connects.
+- [ ] Superset datasets + one dashboard (revenue per day and per city), exported into
+  `superset/dashboards/`.
 
 **Verified 2026-11-06:** `clickhouse_reader` reads silver and nothing else; ClickHouse reads
 silver through `silver_pg` with matching values and times (1167 = source); `superset_reader`
@@ -615,11 +635,17 @@ all healthy (Loki has no healthcheck); ClickHouse and Superset logs reach Loki.
   one, not the whole directory. The `Listen [::]... failed` warnings are harmless (no IPv6 on
   the Docker network).
 - `dbt debug` fails its `git` check (no git in the image) — only needed for dbt packages.
+- Dashboards-as-code, tested with a throwaway dashboard (since deleted): exported, Superset volume
+  removed, restart → database created with the fixed uuid, dashboard imported, a query through
+  the imported dataset returned 1217 (the password survived); renamed in the UI and restarted →
+  "all 1 dashboard(s) exist, kept as they are", rename kept. Healthy 60 s after start on an empty
+  volume.
 
 **Done when:**
 - `dbt run` and `dbt test` pass from the DAG.
 - `SELECT count() FROM gold.fct_orders FINAL` matches the current, non-deleted orders in silver.
-- The Superset dashboard shows revenue per day and per city.
+- The Superset dashboard shows revenue per day and per city, and comes back by itself on an
+  empty Superset volume (imported from `superset/dashboards/`).
 
 ## Phase 7 — Search + API
 

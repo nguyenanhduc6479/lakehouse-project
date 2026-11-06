@@ -105,9 +105,9 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-      # dbt tasks (gold) run here (LocalExecutor) against ClickHouse
-      clickhouse:
-        condition: service_healthy
+    # dbt tasks (gold) run here (LocalExecutor) against ClickHouse, but the scheduler doesn't wait
+    # for it: a ClickHouse outage must not stop silver; gold_dbt_run then fails with a clear
+    # connection error
     command: ["airflow", "scheduler"]
     healthcheck:
       test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$$(hostname)\" || exit 1"]

@@ -146,7 +146,9 @@ the others by service name. All credentials and tunables live in `.env` and are 
   default privileges for new tables) — `users.d/admin.xml` (gives the image-created `admin` the
   `NAMED COLLECTION` right: `access_management` doesn't, and XML users can't be granted through
   SQL — so the admin name is fixed to `admin`, password `CLICKHOUSE_ADMIN_PASSWORD`) and
-  `users.d/superset_reader.xml` (`SUPERSET_READER_PASSWORD`, `GRANT SELECT ON gold.*`). The
+  `users.d/superset_reader.xml` (`SUPERSET_READER_PASSWORD`, `GRANT SELECT ON gold.*`, own profile:
+  `readonly=2` — clickhouse-connect sends settings, `readonly=1` would reject them —
+  `max_execution_time` 60 s, `max_memory_usage` ~2 GB, both capped by constraints). The
   `Listen [::]... failed` warnings at start are harmless (no IPv6 on the network).
   **Superset 6.1.0** (`compose/superset.yml`, `custom-superset:6.1.0` from `superset/Dockerfile`:
   + `clickhouse-connect` 0.15.1 — the stock image has no driver; baked in, not pip-installed at
@@ -154,10 +156,17 @@ the others by service name. All credentials and tunables live in `.env` and are 
   Metadata in **SQLite** on volume `superset_home_vol` (`/app/superset_home/superset.db`; not for
   production per Superset's docs, enough for one user — Superset doesn't depend on Postgres).
   One service: its `command` runs `superset/scripts/init.sh` (idempotent: `db upgrade`, admin
-  `SUPERSET_ADMIN_USER` created or its password reset to `.env`, `superset init`,
-  `set-database-uri` **ClickHouse gold** as `superset_reader`) then `exec`s the image's
-  `/app/docker/entrypoints/run-server.sh`; healthy after ~70 s on an empty volume, ~50 s on a
-  restart. No datasets/dashboards yet.
+  `SUPERSET_ADMIN_USER` created or its password reset to `.env`, `superset init`, then
+  `superset/scripts/bootstrap.py`) then `exec`s the image's
+  `/app/docker/entrypoints/run-server.sh`; healthy after ~60–70 s on an empty volume, ~50 s on a
+  restart. `bootstrap.py` registers **ClickHouse gold** as `superset_reader` with a **fixed uuid**
+  (`DB_UUID` — never change it: exported datasets reference the database by uuid with the
+  password masked, and on an empty volume the importer refuses that unless the uuid exists;
+  `set-database-uri` would give a random one) and a URL-encoded password, then imports the
+  **dashboards kept in git**: `superset/dashboards/` (mounted at `/dashboards`) is an unzipped
+  export bundle written by `bash superset/export-dashboards.sh`; only dashboards missing from the
+  metadata DB are imported, so UI edits survive restarts and an empty volume gets everything back
+  (`superset/dashboards/README.md`). No dashboards yet (folder holds only the README).
 - **CDC** (`compose/connect.yml`): **Kafka Connect** `custom-connect:7.6.0` from `connect/Dockerfile`
   (`cp-kafka-connect:7.6.0` + **Debezium Postgres 2.7.4.Final**, Maven Central tarball, SHA-1
   checked — the image runs **Java 11**, so Debezium 3.x (Java 17) is out). Multi-stage: stage

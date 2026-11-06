@@ -43,3 +43,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+# the repo's superset/ folder (config + scripts) is not the `superset` package the scripts import
+[tool.ruff.lint.isort]
+known-third-party = ["superset"]

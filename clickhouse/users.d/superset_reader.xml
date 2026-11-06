@@ -1,13 +1,28 @@
-<!-- Read-only user Superset connects with: SELECT on the gold database only. The admin user
-     (dbt) is created by the image from CLICKHOUSE_USER / CLICKHOUSE_PASSWORD. -->
+<!-- Read-only user Superset connects with: SELECT on the gold database only, under its own profile
+     (limits below). The admin user (dbt) is created by the image from CLICKHOUSE_USER /
+     CLICKHOUSE_PASSWORD. -->
 <clickhouse>
+    <profiles>
+        <superset_reader>
+            <!-- 2 = read-only, but settings may be changed per query: clickhouse-connect sends
+                 settings with its queries, which readonly=1 would reject -->
+            <readonly>2</readonly>
+            <max_execution_time>60</max_execution_time>          <!-- seconds per query -->
+            <max_memory_usage>2000000000</max_memory_usage>      <!-- ~2 GB per query -->
+            <!-- readonly=2 lets a query raise its own limits: constraints cap them -->
+            <constraints>
+                <max_execution_time><max>60</max></max_execution_time>
+                <max_memory_usage><max>2000000000</max></max_memory_usage>
+            </constraints>
+        </superset_reader>
+    </profiles>
     <users>
         <superset_reader>
             <password from_env="SUPERSET_READER_PASSWORD"/>
             <networks>
                 <ip>::/0</ip>
             </networks>
-            <profile>default</profile>
+            <profile>superset_reader</profile>
             <quota>default</quota>
             <grants>
                 <query>GRANT SELECT ON gold.*</query>

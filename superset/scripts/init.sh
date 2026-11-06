@@ -1,7 +1,9 @@
 #!/bin/bash
 # Runs at every start of the superset container, before the web server (compose/superset.yml):
-# migrate the metadata DB (SQLite), ensure the admin user, sync roles/permissions and register the
-# ClickHouse gold database (read-only user superset_reader). Idempotent: a re-run only re-checks.
+# migrate the metadata DB (SQLite), ensure the admin user, sync roles/permissions, then
+# bootstrap.py: register the ClickHouse gold database (read-only user superset_reader) and import
+# the dashboards kept in git that are missing. Idempotent: a re-run only re-checks. If Superset
+# doesn't come up, read this script's output first: `docker compose logs superset`.
 set -euo pipefail
 
 echo "migrating the metadata DB..."
@@ -19,9 +21,7 @@ fi
 echo "syncing roles and permissions..."
 superset init
 
-# creates the database entry, or updates its URI if it exists
-echo "registering database 'ClickHouse gold'..."
-superset set-database-uri --database_name "ClickHouse gold" \
-    --uri "clickhousedb://superset_reader:${SUPERSET_READER_PASSWORD}@clickhouse:8123/gold"
+# database "ClickHouse gold" (fixed uuid) + dashboards from superset/dashboards/: bootstrap.py
+python /scripts/bootstrap.py
 
 echo "superset init done."
