@@ -330,10 +330,22 @@ update of one row in one transaction is a single version.
 The apply logic has its own tests on a scratch DB (`tests/test_silver_apply_db.py`, marker
 `postgres`): `set -a && . ./.env && set +a && venv/bin/python -m pytest -m postgres`.
 
-**Rebuild a table from bronze** (e.g. after changing the transform): in one transaction
-`TRUNCATE silver.orders;` and `UPDATE config.etl_checkpoint SET last_snapshot_id = NULL WHERE
-pipeline = 'silver' AND table_name = 'silver.orders';`, then trigger the DAG. Resetting only the
-checkpoint does nothing — every event is skipped by `_lsn`. Don't do it while a run is active.
+**Rebuild a table from bronze** (e.g. after changing the transform, or to repair silver):
+trigger the DAG with `full_refresh` on, for one table:
+
+```bash
+docker exec airflow-scheduler airflow dags trigger platform_pipeline \
+  -c '{"table": "users", "full_refresh": true}'
+```
+
+`silver_spark` stages the whole bronze table, `silver_apply` replaces the silver table in one
+transaction (log: `silver.users: FULL REFRESH from bronze up to snapshot ...: N old rows deleted,
+M staged, M inserted`; readers see the old rows until the commit), then `silver_verify` and gold
+run as usual. It runs even if bronze has no new snapshot. `all` is refused (one table per run).
+Resetting only the checkpoint by hand does nothing — every event is skipped by `_lsn`; the
+manual equivalent is `TRUNCATE` + checkpoint `NULL` in one transaction, then a normal run (silver
+is empty in between). Full refresh recomputes the data, not the DDL: column types stay as they
+are.
 
 ## Polaris tokens: expiry and reset
 

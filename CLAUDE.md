@@ -77,7 +77,12 @@ no HA, replicas, poolers or TLS.
   `airflow/dags/platform_pipeline.py` (`silver_spark` → `silver_apply` → `silver_verify`;
   `airflow/dags/lib/silver_verify.py` checks silver invariants and reconciles with bronze at the
   checkpoint snapshot via Trino `FOR VERSION AS OF`; `schedule=None`, `max_active_runs=1`, param `table`:
-  `all` or one table, passed to the Spark job as `--table` through `submit_and_wait(app_args=)`).
+  `all` or one table, passed to the Spark job as `--table` through `submit_and_wait(app_args=)`;
+  param `full_refresh` (bool, one table only): `--full-refresh` stages all of bronze with a batch
+  row without start snapshot, and `silver_apply` recognises that row by itself and replaces the
+  table in one transaction. The DAG has `render_template_as_native_obj=True`: every param reaches
+  its task as an argument rendered from `"{{ params.<name> }}"`, with its real type — without it
+  the bool renders as the string `"False"`, which is truthy; `silver_spark` also checks the type).
   A new DAG file is
   triggerable only after the scheduler serializes it (`airflow dags reserialize`, else up to
   5 min; before that `dags trigger` → `DagNotFound`). Tests: `tests/test_job_silver.py` (spark),
@@ -327,6 +332,10 @@ no root `requirements.txt`):
 
 ```bash
 uv pip install --python venv/bin/python --group dev
+# optional, for the editor only (resolves airflow.* / pendulum in DAGs; same versions + constraints
+# as the image). The venv has no pip: a bare `pip` is the system one (PEP 668 refuses it)
+uv pip install --python venv/bin/python --group airflow \
+  --constraint https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.11.txt
 venv/bin/ruff format . && venv/bin/ruff check --fix .
 venv/bin/python -m pytest -m "not spark"     # host tests (no JVM in WSL); `postgres` ones skip
                                               # unless .env is sourced and the stack is up:

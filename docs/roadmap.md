@@ -546,6 +546,20 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   A `_valid_to` shifted by 1 s on one real version made it fail with `broken_chains` (reverted).
   Tests: 3 host (SQL), 4 on the scratch DB (normal apply, broken histories, bronze mismatch,
   before the first apply). Only "silver = source" stays manual: it holds only once drained.
+- **DAG param `full_refresh`** (2026-11-06): rebuild one table's silver from the whole bronze
+  table (after changing the transform, or to repair silver) — replaces the manual
+  `TRUNCATE` + checkpoint reset, which left silver empty until the next run. `job_silver.py
+  --full-refresh` (an argparse flag: a `"false"` string value would be truthy) stages all of
+  bronze with no start snapshot; `silver_apply` recognises that batch by itself and `DELETE`s +
+  re-inserts in one transaction, even without a new bronze snapshot; refused with `all` and when
+  bronze has no snapshot. The DAG renders templates as native objects
+  (`render_template_as_native_obj=True`), so both params reach the tasks the same way, as
+  arguments from `"{{ params.<name> }}"`, with their real types (by default a template renders
+  `"False"`, a truthy string; `silver_spark` also checks the type). Tests: 4 more on the scratch DB (damaged history rebuilt,
+  no new snapshot, failure leaves silver untouched, empty bronze refused) + 3 for the flag.
+  Verified: `silver.users` damaged (current names overwritten, 6 old versions deleted) → full
+  refresh → history identical byte for byte to before (516 rows), verify OK, = source; `all` +
+  `full_refresh` refused; the next run without conf was incremental.
 - Lesson: **a grouping rule applied per batch is only correct if a batch boundary can't cut the
   group.** Here batches are cut by the sink's commits, which know nothing about source
   transactions — so the rule had to be finished across batches in the apply. Test the boundary,

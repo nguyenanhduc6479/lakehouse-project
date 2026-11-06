@@ -10,8 +10,13 @@ from silver, then runs the dbt tests (incl. gold count = silver count).
 
 Param `table`: `all` (default) = every active table in config.etl_checkpoint; or one table,
 `users` / `silver.users`. It limits the silver tasks only: gold is always rebuilt in full.
+Param `full_refresh` (default false): rebuild ONE table's silver history from the whole bronze
+table instead of applying only the new snapshots — after changing the silver transform, or to
+repair silver. Needs a specific `table` (not `all`). silver_apply recognises the rebuilt staging
+batch by itself and replaces the table in one transaction (lib/silver_apply.py).
 From the CLI:
     airflow dags trigger platform_pipeline -c '{"table": "users"}'
+    airflow dags trigger platform_pipeline -c '{"table": "users", "full_refresh": true}'
 
 A later phase adds the ES sync next to the gold tasks.
 """
@@ -35,6 +40,10 @@ DBT = "cd /opt/airflow/dbt && /opt/airflow/dbt-venv/bin/dbt --no-use-colors"
     catchup=False,
     # two runs at once would race on staging and the checkpoints
     max_active_runs=1,
+    # templates render to Python objects, not strings: "{{ params.full_refresh }}" gives the bool
+    # False (a string "False" would be truthy). Every param reaches its task the same way, as a
+    # task argument rendered from "{{ params.<name> }}"; the dbt bash_commands are plain strings
+    render_template_as_native_obj=True,
     params={
         "table": Param(
             "all",
@@ -42,26 +51,40 @@ DBT = "cd /opt/airflow/dbt && /opt/airflow/dbt-venv/bin/dbt --no-use-colors"
             pattern=r"^(all|(silver\.)?[a-z_][a-z0-9_]*)$",
             description="'all' = every active table in config.etl_checkpoint, "
             "or one table: users / silver.users",
-        )
+        ),
+        "full_refresh": Param(
+            False,
+            type="boolean",
+            description="false = incremental (new bronze snapshots only); true = rebuild the "
+            "table's silver history from the whole bronze table (needs a specific table)",
+        ),
     },
     tags=["silver", "gold"],
 )
 def platform_pipeline():
     @task
-    def silver_spark(table: str) -> None:
+    def silver_spark(table: str, full_refresh: bool) -> None:
         from airflow.providers.postgres.hooks.postgres import PostgresHook
         from lib.silver_apply import active_tables, resolve_table
         from lib.spark_rest import submit_and_wait
 
+        # guard against losing render_template_as_native_obj: "False" would mean a full refresh
+        if not isinstance(full_refresh, bool):
+            raise TypeError(f"full_refresh must be a bool, got {full_refresh!r}")
         table = resolve_table(table)
+        if full_refresh and table == "all":
+            raise ValueError("full_refresh needs a specific table, not 'all'")
         # fail here with a readable error instead of a FAILED Spark driver a minute later
         conn = PostgresHook(postgres_conn_id="postgres_conn").get_conn()
         try:
             active_tables(conn, table)
         finally:
             conn.close()
-        submit_and_wait("job_silver.py", app_args=["--table", table])
+        # Spark's appArgs are strings: pass the flag only when it is on
+        app_args = ["--table", table] + (["--full-refresh"] if full_refresh else [])
+        submit_and_wait("job_silver.py", app_args=app_args)
 
+    # no full_refresh here: silver_apply recognises a full-refresh batch from staging.batch
     @task
     def silver_apply(table: str) -> None:
         from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -91,7 +114,13 @@ def platform_pipeline():
     gold_dbt_test = BashOperator(task_id="gold_dbt_test", bash_command=f"{DBT} test")
 
     table = "{{ params.table }}"
-    (silver_spark(table) >> silver_apply(table) >> silver_verify(table) >> gold_dbt_run)
+    full_refresh = "{{ params.full_refresh }}"
+    (
+        silver_spark(table, full_refresh)
+        >> silver_apply(table)
+        >> silver_verify(table)
+        >> gold_dbt_run
+    )
     gold_dbt_run >> gold_dbt_test
 
 

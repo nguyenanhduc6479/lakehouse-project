@@ -549,9 +549,16 @@ Spark ghi (tiền `numeric(38,2)`, chuỗi timestamp ISO của Debezium dạng `
 của nguồn. Cột thêm sau sẽ có kiểu của staging (một cột timestamp mới sẽ là `text` cho đến khi
 sửa tay).
 
-Dựng lại toàn bộ một bảng từ bronze: trong một transaction `TRUNCATE silver.<table>` và đặt
-`last_snapshot_id` của checkpoint bảng đó về NULL, rồi trigger DAG (chỉ reset checkpoint thì không
-có tác dụng: mọi event đều bị bỏ qua nhờ `_lsn`).
+Dựng lại toàn bộ một bảng từ bronze — tham số DAG `full_refresh` (§9): `job_silver.py
+--full-refresh` bỏ qua checkpoint và đưa toàn bộ bảng bronze vào staging, ghi một dòng batch **không
+có snapshot bắt đầu**. Bước apply chỉ dựa vào đó để nhận ra full refresh (start NULL trong khi
+checkpoint đã có — batch cộng dồn luôn bắt đầu tại checkpoint; lần chạy đầu tiên thì chưa có
+checkpoint) và, trong cùng transaction, `DELETE` bảng silver trước khi insert (`DELETE` chứ không
+`TRUNCATE`: người đọc vẫn thấy dữ liệu cũ tới lúc commit thay vì phải chờ khóa độc quyền). Nó không
+bị bỏ qua khi bronze không có snapshot mới, và bị từ chối nếu bronze không có snapshot nào. Quyết
+định dựa trên `staging.batch` thay vì tham số DAG nên chạy lại riêng `silver_apply` không thể xóa
+sạch silver bằng một batch cộng dồn. Chỉ reset checkpoint thì không có tác dụng: mọi event đều bị
+bỏ qua nhờ `_lsn`.
 
 ## 7. Elasticsearch — tìm kiếm
 
@@ -612,9 +619,11 @@ HTML tĩnh duy nhất do API phục vụ.
 **Airflow — DAG `platform_pipeline`, `schedule=None`, kích hoạt thủ công, `max_active_runs=1`.**
 Tham số `table`: `all` (mặc định) = mọi bảng active trong `config.etl_checkpoint`, hoặc một bảng
 (`users` hoặc `silver.users`; được kiểm tra bằng pattern lúc trigger và đối chiếu với bảng
-checkpoint trước khi submit bất cứ thứ gì).
+checkpoint trước khi submit bất cứ thứ gì). Tham số `full_refresh` (boolean, mặc định false): dựng
+lại silver của một bảng từ toàn bộ bảng bronze (§6.4); bị từ chối khi đi cùng `all`.
 
-1. `silver_spark` — submit `job_silver.py --table <table>` qua Spark REST 6066 (`appArgs`).
+1. `silver_spark` — submit `job_silver.py --table <table>` (+ `--full-refresh`) qua Spark REST
+   6066 (`appArgs`).
 2. `silver_apply` — chạy SQL SCD2 (§6.4) trên Postgres qua `postgres_conn` và đẩy checkpoint lên.
 3. `silver_verify` — cho từng bảng: mỗi key đúng một version hiện tại, không có version dài 0,
    chuỗi version của mỗi key không hở hay chồng lấn (Postgres), và số dòng / số dòng hiện tại =

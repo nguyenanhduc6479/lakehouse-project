@@ -124,14 +124,19 @@ def read_bronze(spark: SparkSession, table: str, start: int | None, end: int) ->
     return reader.load(table)
 
 
-def process_table(spark: SparkSession, cp, jdbc: dict[str, str]) -> tuple | None:
-    """Stage one table; returns its staging.batch row, or None if bronze has no such table."""
-    target, source, keys, start = (
-        cp["table_name"],
-        cp["source_table"],
-        list(cp["key_columns"]),
-        cp["last_snapshot_id"],
-    )
+def process_table(
+    spark: SparkSession, cp, jdbc: dict[str, str], full_refresh: bool = False
+) -> tuple | None:
+    """Stage one table; returns its staging.batch row, or None if bronze has no such table.
+
+    `full_refresh`: ignore the checkpoint and stage the whole bronze table (start = None). The
+    batch row then has no start snapshot while the checkpoint has one, which is how
+    silver_apply recognises a full refresh and rebuilds the silver table instead of appending.
+    """
+    target, source, keys = cp["table_name"], cp["source_table"], list(cp["key_columns"])
+    start = None if full_refresh else cp["last_snapshot_id"]
+    if full_refresh:
+        log.info("%s: full refresh, checkpoint %s ignored", target, cp["last_snapshot_id"])
     if not spark.catalog.tableExists(source):
         log.warning("%s: bronze table %s does not exist yet, skipped", target, source)
         return None
@@ -173,10 +178,21 @@ def merge_batches(existing: list[tuple], new: list[tuple], active: list[str]) ->
     return [merged[name] for name in sorted(merged)]
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="bronze -> staging for the silver layer")
     parser.add_argument("--table", default="all", help="'all' or a silver table, e.g. silver.users")
-    table = parser.parse_args().table
+    # a flag, not a value: a string "false" would be truthy (and BooleanOptionalAction is 3.9+)
+    parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+        help="ignore the checkpoint: stage the whole bronze table, silver_apply rebuilds silver",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
+    table, full_refresh = args.table, args.full_refresh
 
     spark = get_spark("job_silver")
     jdbc = postgres_jdbc_options()
@@ -193,9 +209,17 @@ def main() -> None:
     )
     active = [cp["table_name"] for cp in checkpoints]
     checkpoints = select_checkpoints(checkpoints, table)
-    log.info("tables: %s", ", ".join(cp["table_name"] for cp in checkpoints))
+    log.info(
+        "tables: %s%s",
+        ", ".join(cp["table_name"] for cp in checkpoints),
+        " (full refresh)" if full_refresh else "",
+    )
     now = datetime.now(timezone.utc).isoformat()
-    batches = [b + (now,) for b in (process_table(spark, cp, jdbc) for cp in checkpoints) if b]
+    batches = [
+        b + (now,)
+        for b in (process_table(spark, cp, jdbc, full_refresh) for cp in checkpoints)
+        if b
+    ]
 
     # Written last: until here staging.batch still describes the previous run, whose range is
     # never ahead of the checkpoint, so a failure above can make silver_apply lag, never skip.

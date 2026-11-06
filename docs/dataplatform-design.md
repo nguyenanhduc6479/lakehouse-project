@@ -540,9 +540,16 @@ in statement 1 too): staging keeps what Spark wrote (money `numeric(38,2)`, Debe
 timestamp strings as `text`), silver keeps the source types. A column added later arrives with
 staging's type (a new timestamp column would be `text` until altered by hand).
 
-Full rebuild of one table from bronze: in one transaction `TRUNCATE silver.<table>` and set its
-checkpoint's `last_snapshot_id` to NULL, then trigger the DAG (only resetting the checkpoint is
-a no-op: every event would be skipped by `_lsn`).
+Full rebuild of one table from bronze — DAG param `full_refresh` (§9): `job_silver.py
+--full-refresh` ignores the checkpoint and stages the whole bronze table, writing a batch row with
+**no start snapshot**. The apply recognises a full refresh from that alone (start NULL while the
+checkpoint is set — an incremental batch always starts at the checkpoint; the very first run has
+no checkpoint) and, in the same transaction, `DELETE`s the silver table before inserting
+(`DELETE`, not `TRUNCATE`: readers keep the old rows until the commit instead of waiting on an
+exclusive lock). It is not skipped when bronze has no new snapshot, and is refused if bronze has
+no snapshot at all. Deciding from `staging.batch` rather than the DAG param means re-running only
+`silver_apply` can't wipe silver with an incremental batch. Only resetting the checkpoint is a
+no-op: every event would be skipped by `_lsn`.
 
 ## 7. Elasticsearch — search
 
@@ -603,9 +610,11 @@ a single static HTML page served by the API.
 **Airflow — DAG `platform_pipeline`, `schedule=None`, triggered by hand, `max_active_runs=1`.**
 Param `table`: `all` (default) = every active table in `config.etl_checkpoint`, or one table
 (`users` or `silver.users`; validated by a pattern at trigger time and against the checkpoint
-table before anything is submitted).
+table before anything is submitted). Param `full_refresh` (boolean, default false): rebuild one
+table's silver from the whole bronze table (§6.4); refused with `all`.
 
-1. `silver_spark` — submit `job_silver.py --table <table>` via Spark REST 6066 (`appArgs`).
+1. `silver_spark` — submit `job_silver.py --table <table>` (+ `--full-refresh`) via Spark REST
+   6066 (`appArgs`).
 2. `silver_apply` — run the SCD2 SQL (§6.4) on Postgres through `postgres_conn` and advance the
    checkpoint.
 3. `silver_verify` — per table: one current version per key, no zero-length version, no gap or

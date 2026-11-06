@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from job_silver import merge_batches, select_checkpoints
+from job_silver import merge_batches, parse_args, select_checkpoints
 
 ROWS = [{"table_name": "silver.orders"}, {"table_name": "silver.users"}]
 
@@ -47,3 +47,18 @@ def test_merge_adds_new_tables_and_drops_inactive_ones():
         ("silver.orders", 3, 4, 7, OLD),
         ("silver.users", None, 9, 3, NOW),
     ]
+
+
+def test_full_refresh_is_off_by_default():
+    args = parse_args(["--table", "silver.users"])
+    assert (args.table, args.full_refresh) == ("silver.users", False)
+
+
+def test_full_refresh_flag():
+    assert parse_args(["--table", "silver.users", "--full-refresh"]).full_refresh is True
+
+
+def test_full_refresh_takes_no_value():
+    # a value like "false" would be truthy if it were accepted
+    with pytest.raises(SystemExit):
+        parse_args(["--full-refresh", "false"])

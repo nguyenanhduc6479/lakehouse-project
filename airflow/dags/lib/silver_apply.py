@@ -9,6 +9,18 @@ Per table, in ONE Postgres transaction:
    close the current versions that have a newer staging event, then insert the staging versions
    silver doesn't have yet (all skip anything at or below silver's `_lsn` -> idempotent);
 4. move the checkpoint to the snapshot staging was read up to.
+
+**Full refresh** (DAG param `full_refresh`, job_silver `--full-refresh`): staging then holds the
+whole bronze table and its batch row has no start snapshot while the checkpoint has one — an
+incremental batch always starts at the checkpoint, so this can't be mistaken for one (the very
+first run has no checkpoint and is applied normally). The apply then deletes every silver row of
+the table first, in the same transaction: readers keep seeing the old silver until the commit,
+and a failure leaves it untouched. It is recognised from staging.batch, not from the DAG param,
+so re-running only silver_apply can never wipe silver with an incremental batch. A side effect:
+re-applying the very first batch of a table (also no start) is a full refresh too — correct, it
+holds the whole bronze table, and gives the same history (only `_silver_updated_at` changes).
+A full-refresh batch whose bronze table has no snapshot is refused instead of emptying silver.
+
 Either all of it commits or nothing does. Tables are applied independently (silver is
 eventually consistent across tables): one failing table does not stop the others, but the task
 fails at the end.
@@ -56,6 +68,11 @@ ADVANCE_CHECKPOINT_SQL = """
     SET last_snapshot_id = %s, updated_at = now()
     WHERE pipeline = 'silver' AND table_name = %s
 """
+
+# full refresh: drop the old history before inserting the rebuilt one. DELETE, not TRUNCATE:
+# TRUNCATE takes an ACCESS EXCLUSIVE lock and would block every reader of the table until the
+# commit; DELETE lets them read the old rows meanwhile (demo-sized tables: the cost is nothing)
+FULL_REFRESH_DELETE_TEMPLATE = "DELETE FROM {silver}"
 
 # column name -> full type (e.g. numeric(18,2)) of a table, in column order
 COLUMNS_SQL = """
@@ -197,15 +214,28 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
 
     cur.execute(CHECKPOINT_SQL, (silver_table,))
     checkpoint = cur.fetchone()[0]
-    if end == checkpoint:
-        return f"{silver_table}: batch already applied (checkpoint {checkpoint}), skipped"
-    if start != checkpoint:
+    # checked before the "already applied" test: a full refresh runs even when bronze has no
+    # new snapshot (end == checkpoint)
+    full_refresh = start is None and checkpoint is not None
+    if not full_refresh:
+        if end == checkpoint:
+            return f"{silver_table}: batch already applied (checkpoint {checkpoint}), skipped"
+        if start != checkpoint:
+            raise RuntimeError(
+                f"{silver_table}: staging batch starts after snapshot {start} but the checkpoint "
+                f"is {checkpoint}; re-run silver_spark to rebuild staging"
+            )
+
+    if full_refresh and end is None:
         raise RuntimeError(
-            f"{silver_table}: staging batch starts after snapshot {start} but the checkpoint is "
-            f"{checkpoint}; re-run silver_spark to rebuild staging"
+            f"{silver_table}: full-refresh batch but the bronze table has no snapshot; "
+            "refusing to empty silver"
         )
 
-    superseded = closed = inserted = 0
+    deleted = superseded = closed = inserted = 0
+    if full_refresh:
+        cur.execute(FULL_REFRESH_DELETE_TEMPLATE.format(silver=quote_table(silver_table)))
+        deleted = cur.rowcount
     if rows:
         staging_table = staging_table_of(silver_table)
         staging_types = _columns(cur, staging_table)
@@ -226,6 +256,11 @@ def apply_table(cur, silver_table: str, key_columns: list[str]) -> str:
         inserted = cur.rowcount
 
     cur.execute(ADVANCE_CHECKPOINT_SQL, (end, silver_table))
+    if full_refresh:
+        return (
+            f"{silver_table}: FULL REFRESH from bronze up to snapshot {end} (checkpoint was "
+            f"{checkpoint}): {deleted} old rows deleted, {rows} staged, {inserted} inserted"
+        )
     return (
         f"{silver_table}: snapshots ({start}, {end}], {rows} staged, "
         f"{superseded} superseded, {closed} versions closed, {inserted} inserted"

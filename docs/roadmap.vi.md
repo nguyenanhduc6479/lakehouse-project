@@ -547,6 +547,19 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   Làm lệch `_valid_to` của một version thật 1 giây thì task fail với `broken_chains` (đã hoàn tác).
   Test: 3 trên host (SQL), 4 trên DB nháp (apply bình thường, lịch sử hỏng, lệch với bronze, trước
   lần apply đầu). Chỉ còn "silver = nguồn" là kiểm tra tay: nó chỉ đúng khi pipeline đã xử lý hết.
+- **Tham số DAG `full_refresh`** (2026-11-06): dựng lại silver của một bảng từ toàn bộ bảng bronze
+  (sau khi đổi logic biến đổi, hoặc để sửa silver) — thay cho cách làm tay `TRUNCATE` + reset
+  checkpoint, vốn để silver trống tới lần chạy sau. `job_silver.py --full-refresh` (cờ argparse:
+  nhận giá trị chuỗi `"false"` thì vẫn là truthy) đưa toàn bộ bronze vào staging, không có snapshot
+  bắt đầu; `silver_apply` tự nhận ra batch đó và `DELETE` + insert lại trong một transaction, kể cả
+  khi không có snapshot bronze mới; bị từ chối khi đi cùng `all` và khi bronze không có snapshot.
+  DAG render template thành object Python (`render_template_as_native_obj=True`), nên cả hai tham số
+  tới task theo cùng một cách, là đối số render từ `"{{ params.<name> }}"`, đúng kiểu dữ liệu (mặc
+  định template render ra `"False"`, một chuỗi truthy; `silver_spark` còn kiểm tra kiểu).
+  Test: thêm 4 test trên DB nháp (lịch sử hỏng được dựng lại, không có snapshot mới, lỗi thì silver
+  giữ nguyên, bronze rỗng bị từ chối) + 3 test cho cờ. Đã kiểm tra: làm hỏng `silver.users` (ghi đè
+  tên hiện hành, xóa 6 version cũ) → full refresh → lịch sử giống từng byte với trước đó (516 dòng),
+  verify OK, = nguồn; `all` + `full_refresh` bị từ chối; lần chạy kế tiếp không có conf là cộng dồn.
 - Bài học: **một luật gộp áp theo từng batch chỉ đúng nếu ranh giới batch không cắt ngang nhóm.** Ở
   đây batch bị cắt bởi các lần commit của sink, vốn không biết gì về transaction nguồn — nên luật
   phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình
