@@ -85,7 +85,8 @@ services:
     container_name: generator
     logging: *default-logging
     profiles: ["generator"]
-    restart: on-failure
+    # no restart policy for now (local only; restore on a real server): see schema-registry in
+    # compose/infra.yml
     depends_on:
       source-db-setup:
         condition: service_completed_successfully

@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: dim_users
+    description: Current users (silver.users, _is_current and not _is_deleted).
+    columns:
+      - name: user_id
+        data_tests: [unique, not_null]
+  - name: fct_orders
+    description: Current orders (silver.orders, _is_current and not _is_deleted).
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: order_date
+        data_tests: [not_null]
+      - name: total_amount
+        data_tests: [not_null]

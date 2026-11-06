@@ -1,0 +1,16 @@
+<!-- Connection to silver in Postgres `data-platform`, used by dbt's staging models:
+         SELECT ... FROM postgresql(silver_pg, table = 'orders')
+     Read-only role `clickhouse_reader` (created and granted by postgres-setup). Values marked
+     from_env come from the container environment (compose/clickhouse.yml <- .env). -->
+<clickhouse>
+    <named_collections>
+        <silver_pg>
+            <host>postgres</host>
+            <port>5432</port>
+            <database from_env="POSTGRES_DB"/>
+            <schema>silver</schema>
+            <user>clickhouse_reader</user>
+            <password from_env="CLICKHOUSE_READER_PASSWORD"/>
+        </silver_pg>
+    </named_collections>
+</clickhouse>

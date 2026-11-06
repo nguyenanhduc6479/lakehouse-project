@@ -67,9 +67,9 @@ OLAP engine (MergeTree, background merges, `FINAL`, incremental loads from an ex
 | Trino | SQL over bronze (inspection, debugging, test scenarios) | Already in the stack; not on the main data path |
 | PySpark | Bronze → silver (SCD Type 2) | Existing Spark cluster, submitted via REST 6066; `spark.master` is set in `spark-defaults.conf` so REST jobs get real executors; driver/executor logs land in Grafana (`service=spark-job`) |
 | Postgres (silver, Postgres 16) | Silver tables, also the web app's database | Database `data-platform` (`POSTGRES_DB`) on the existing `postgres` service, next to `airflow` and `polaris`; Airflow reaches it as `postgres_conn` |
-| ClickHouse | Gold (OLAP): stores the gold tables, serves Superset and the API | Single node |
-| dbt-clickhouse | Silver → gold | Runs in the Airflow containers (`./dbt`); added to `airflow/requirements.txt` in the gold phase — check it resolves against the Airflow 2.9.2 constraints |
-| Superset | Dashboards | Custom image adding the `clickhouse-connect` driver (not in the stock image) |
+| ClickHouse | Gold (OLAP): stores the gold tables, serves Superset and the API | 26.8 LTS, single node, HTTP 8123; users `admin` (dbt) and `superset_reader` (SELECT on `gold.*`); reads silver through the named collection `silver_pg` as the read-only Postgres role `clickhouse_reader` |
+| dbt-clickhouse | Silver → gold | dbt-core 1.12 + dbt-clickhouse 1.10 in their own virtualenv in the Airflow image (`/opt/airflow/dbt-venv`, `airflow/dbt-requirements.txt`) — kept out of Airflow's constraints; project `./dbt` |
+| Superset | Dashboards | 6.1, custom image adding `clickhouse-connect` + `psycopg2` (the stock image has no driver); metadata in Postgres DB `superset`; one-shot `superset-init` registers **ClickHouse gold** |
 | Elasticsearch 7.17 | Search for the web app | Already in `compose/infra.yml`; Python client must be `elasticsearch` 7.x (8.x refuses a 7.x server) |
 | FastAPI | The web app's only read path | ES for search, silver for detail/history, gold for numbers |
 | Airflow | Orchestrates the batch steps | Manual trigger only; runs light tasks itself (SQL on Postgres, the ES sync); heavy transforms run in Spark and dbt |
@@ -557,6 +557,10 @@ The watermark is the max `_silver_updated_at` processed, stored in `config.etl_c
 To change the document shape, just recreate the index (demo — no alias switching).
 
 ## 8. Gold — ClickHouse
+
+**Current state (2026-11-06):** gold models are full rebuilds (`materialized: table` on
+`MergeTree`) — `dim_users`, `fct_orders` from ephemeral `stg_users` / `stg_orders` that read the
+current, non-deleted rows of silver. The incremental design below comes next.
 
 dbt-clickhouse builds gold straight from silver without an intermediate copy. Staging models are
 `ephemeral` and read silver through the `postgresql()` table function (connection details in a

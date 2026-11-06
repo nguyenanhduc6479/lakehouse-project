@@ -12,7 +12,7 @@ Mỗi phase kết thúc bằng một thứ nhìn thấy được là đang chạ
 | 3 | CDC | Xong |
 | 4 | Bronze | Xong |
 | 5 | Silver | Xong |
-| 6 | Gold | Chưa bắt đầu |
+| 6 | Gold | Đang làm |
 | 7 | Search + API | Chưa bắt đầu |
 | 8 | Bảo trì + kịch bản kiểm thử | Chưa bắt đầu |
 
@@ -552,19 +552,64 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   phải được hoàn tất xuyên batch ở bước apply. Hãy test ranh giới, không chỉ trạng thái bình
   thường: các lần chạy thật chưa gặp nó, còn test DB thì tái hiện được bất cứ lúc nào.
 
-## Phase 6 — Gold
+## Phase 6 — Gold *(đang làm)*
 
 **Mục tiêu:** mô hình phân tích trong ClickHouse và dashboard trong Superset.
 
-- [ ] Service ClickHouse (module mới), named collection trỏ tới `data-platform`.
-- [ ] Thêm dbt-clickhouse vào image Airflow (kiểm tra cài được cùng constraints
-  của Airflow 2.9.2); tạo `dbt/profiles.yml` (đã bị xóa cùng dbt-spark) và viết nội dung cho
-  `dbt/dbt_project.yml`.
-- [ ] Model (design §8): staging ephemeral đọc qua `postgresql()`; `dim_users`, `dim_date`,
-  `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, _is_deleted)`);
-  mart doanh thu theo ngày và theo thành phố; macro `get_watermark`; dbt test.
-- [ ] Thêm `dbt run` + `dbt test` vào `platform_pipeline`, chạy sau `silver_apply`.
-- [ ] Service Superset (image + `clickhouse-connect`), kết nối tới ClickHouse, một dashboard.
+Bước 1 (2026-11-06), theo thống nhất: dựng mọi service và nối chúng với nhau, một hai bảng gold
+đầu tiên dạng **dựng lại toàn bộ** (watermark / incremental làm sau), Superset chạy và thấy được
+gold — chưa làm dashboard.
+
+- [x] **ClickHouse 26.8.36.3** (dòng LTS mới nhất), module mới `compose/clickhouse.yml`: một node,
+  chỉ mở cổng host **8123** (cổng native 9000 để nội bộ: 9000 trên host là RustFS), log ra stdout
+  (`clickhouse/config.d/logger.xml`), volume `clickhouse_data_vol`, TZ `Asia/Ho_Chi_Minh`. User:
+  `admin` (image tạo, `CLICKHOUSE_ADMIN_PASSWORD`; dbt dùng) và `superset_reader`
+  (`clickhouse/users.d/superset_reader.xml`, `GRANT SELECT ON gold.*`). Named collection
+  **`silver_pg`** (`clickhouse/config.d/named_collections.xml`) → Postgres `data-platform`, schema
+  `silver`, bằng role Postgres chỉ đọc mới **`clickhouse_reader`** (do `postgres-setup` tạo và cấp
+  quyền: `USAGE` + `SELECT` trên `silver`, default privileges cho bảng mới; bị từ chối ở `config`
+  và mọi lệnh ghi).
+- [x] **dbt-core 1.12.6 + dbt-clickhouse 1.10.3** (+ `dbt-adapters` 1.24.5: dbt-clickhouse cần
+  < 1.25) trong **virtualenv riêng** `/opt/airflow/dbt-venv` của image Airflow
+  (`airflow/dbt-requirements.txt`) — không trộn với constraints của Airflow. `dbt/profiles.yml`
+  (đọc biến môi trường), `dbt/dbt_project.yml`; `DBT_TARGET_PATH` / `DBT_LOG_PATH` đặt trong `/tmp`
+  để không ghi gì vào thư mục project được bind mount.
+- [x] Model đầu tiên: `stg_users` / `stg_orders` dạng ephemeral (dòng hiện tại, chưa xóa của silver
+  qua `postgresql(silver_pg, ...)`, timestamp có kiểu `DateTime64(6, 'Asia/Ho_Chi_Minh')`) → bảng gold
+  **`dim_users`** (không có email/phone) và **`fct_orders`** (+ `order_date` = ngày theo giờ VN),
+  `MergeTree`, `materialized: table`. Test: `unique` / `not_null` + `fct_orders_matches_silver`,
+  `dim_users_matches_silver` (số dòng gold = silver).
+- [x] DAG: `silver_verify` → **`gold_dbt_run`** → **`gold_dbt_test`** (`BashOperator`); tham số
+  `table` chỉ giới hạn các task silver.
+- [x] **Superset 6.1.0** (`superset/Dockerfile`: + `clickhouse-connect` 0.15.1 và `psycopg2-binary`
+  2.9.13 — image gốc không có driver nào), module `compose/superset.yml`, cổng host **8088**.
+  Metadata trong DB Postgres `superset` (role `superset`, do `postgres-setup` tạo); job one-shot
+  `superset-init` (`superset/scripts/init.sh`, idempotent: `db upgrade`, tạo admin hoặc đặt lại mật
+  khẩu theo `.env`, `superset init`, `set-database-uri` cho **ClickHouse gold** bằng
+  `superset_reader`). Không Redis/Celery.
+- [ ] Gold incremental với watermark `_silver_updated_at` (`ReplacingMergeTree`, design §8).
+- [ ] Thêm model: `dim_date`, `fct_order_lines`, mart (doanh thu theo ngày / theo thành phố).
+- [ ] Dataset Superset + một dashboard (doanh thu theo ngày và theo thành phố).
+
+**Đã kiểm tra 2026-11-06:** `clickhouse_reader` đọc được silver và không gì khác; ClickHouse đọc
+silver qua `silver_pg` với giá trị và thời gian khớp (1167 = nguồn); `superset_reader` không tạo
+được gì và chỉ thấy schema `gold`; Superset (REST API) liệt kê `gold.dim_users` / `gold.fct_orders`
+và chạy được truy vấn SQL Lab (số đơn và doanh thu theo ngày); chạy lại `superset-init` → "exists,
+resetting its password". End to end: generator 1 phút → DAG 5 task `success`, `dbt run` 2 model,
+`dbt test` 8/8 PASS, gold = nguồn (1217 order, 221 user). 29 container, tất cả healthy (Loki không có
+healthcheck); log ClickHouse và Superset lên Loki.
+
+**Gặp trên đường:**
+- `postgresql()` trả mọi cột silver về `Nullable` (cột nguồn của silver cố ý cho phép null), mà
+  ClickHouse không chấp nhận khóa partition nullable — bỏ partition (dữ liệu demo không cần) thay vì
+  ép `assumeNotNull`, vì như vậy test `not_null` cũng thành vô nghĩa.
+- Dùng named collection cần quyền **`NAMED COLLECTION`**, mà `access_management` không cấp, và user
+  định nghĩa bằng XML (admin do image tạo) không nhận grant qua SQL được:
+  `clickhouse/users.d/admin.xml` thêm `named_collection_control` cho cùng tên user — nên tên admin
+  được cố định (`admin`, bỏ biến `CLICKHOUSE_ADMIN_USER`).
+- `config.d/docker_related_config.xml` của image chứa `listen_host` — mount từng file cấu hình, không
+  mount cả thư mục. Cảnh báo `Listen [::]... failed` là vô hại (mạng Docker không có IPv6).
+- `dbt debug` fail ở bước kiểm tra `git` (image không có git) — chỉ cần khi dùng dbt packages.
 
 **Hoàn thành khi:**
 - `dbt run` và `dbt test` chạy qua trong DAG.

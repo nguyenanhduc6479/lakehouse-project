@@ -1,0 +1,13 @@
+<!-- Extra rights for the admin user that the image creates from CLICKHOUSE_USER / CLICKHOUSE_PASSWORD
+     (users.d/default-user.xml, written by the entrypoint). ClickHouse merges both files by user
+     name, so the name here must equal CLICKHOUSE_USER in compose/clickhouse.yml (fixed: admin).
+     Using a named collection (postgresql(silver_pg, ...)) needs the NAMED COLLECTION grant, which
+     access_management alone doesn't give, and XML-defined users can't get grants through SQL. -->
+<clickhouse>
+    <users>
+        <admin>
+            <named_collection_control>1</named_collection_control>
+            <show_named_collections>1</show_named_collections>
+        </admin>
+    </users>
+</clickhouse>

@@ -11,7 +11,7 @@ Each phase ends with something you can see working; don't start a phase before t
 | 3 | CDC | Done |
 | 4 | Bronze | Done |
 | 5 | Silver | Done |
-| 6 | Gold | Not started |
+| 6 | Gold | In progress |
 | 7 | Search + API | Not started |
 | 8 | Maintenance + test scenarios | Not started |
 
@@ -551,20 +551,66 @@ Iceberg (`SHOW SCHEMAS FROM lakehouse` → `bronze`, `information_schema`).
   transactions — so the rule had to be finished across batches in the apply. Test the boundary,
   not just the steady state: the live runs never hit it, the DB test does on demand.
 
-## Phase 6 — Gold
+## Phase 6 — Gold *(in progress)*
 
 **Goal:** analytical models in ClickHouse and a dashboard in Superset.
 
-- [ ] ClickHouse service (new module), named collection pointing at `data-platform`.
-- [ ] Add dbt-clickhouse to the Airflow image (check it resolves against the
-  Airflow 2.9.2 constraints); create `dbt/profiles.yml` (removed with dbt-spark) and fill
-  `dbt/dbt_project.yml`.
-- [ ] Models (design §8): ephemeral staging over `postgresql()`; `dim_users`, `dim_date`,
-  `fct_orders`, `fct_order_lines` (`append` + `ReplacingMergeTree(_silver_updated_at, _is_deleted)`);
-  marts for revenue per day and per city; `get_watermark` macro; dbt tests.
-- [ ] Add `dbt run` + `dbt test` to `platform_pipeline` after `silver_apply`.
-- [ ] Superset service (image + `clickhouse-connect`), ClickHouse database connection, one
-  dashboard.
+Step 1 (2026-11-06), as agreed: bring up every service and wire them together, a first one or
+two gold tables as **full rebuilds** (watermark / incremental later), Superset up and able to see
+gold — no dashboards yet.
+
+- [x] **ClickHouse 26.8.36.3** (latest LTS line), new module `compose/clickhouse.yml`: single node,
+  host port **8123** only (native 9000 stays internal: 9000 on the host is RustFS), stdout logging
+  (`clickhouse/config.d/logger.xml`), volume `clickhouse_data_vol`, TZ `Asia/Ho_Chi_Minh`. Users:
+  `admin` (created by the image, `CLICKHOUSE_ADMIN_PASSWORD`; dbt) and `superset_reader`
+  (`clickhouse/users.d/superset_reader.xml`, `GRANT SELECT ON gold.*`). Named collection
+  **`silver_pg`** (`clickhouse/config.d/named_collections.xml`) → Postgres `data-platform`, schema
+  `silver`, as the new read-only Postgres role **`clickhouse_reader`** (created and granted by
+  `postgres-setup`: `USAGE` + `SELECT` on `silver`, default privileges for new tables; denied on
+  `config`, and on any write).
+- [x] **dbt-core 1.12.6 + dbt-clickhouse 1.10.3** (+ `dbt-adapters` 1.24.5: dbt-clickhouse needs
+  < 1.25) in **their own virtualenv** `/opt/airflow/dbt-venv` in the Airflow image
+  (`airflow/dbt-requirements.txt`) — not mixed with Airflow's constraints. `dbt/profiles.yml`
+  (env vars), `dbt/dbt_project.yml`; `DBT_TARGET_PATH` / `DBT_LOG_PATH` under `/tmp` so nothing is
+  written into the bind-mounted project.
+- [x] First models: ephemeral `stg_users` / `stg_orders` (current, non-deleted rows of silver
+  through `postgresql(silver_pg, ...)`, timestamps typed `DateTime64(6, 'Asia/Ho_Chi_Minh')`) →
+  gold tables **`dim_users`** (no email/phone) and **`fct_orders`** (+ `order_date` = Vietnam day),
+  `MergeTree`, `materialized: table`. Tests: `unique` / `not_null` + `fct_orders_matches_silver`,
+  `dim_users_matches_silver` (gold count = silver count).
+- [x] DAG: `silver_verify` → **`gold_dbt_run`** → **`gold_dbt_test`** (`BashOperator`); the
+  `table` param limits only the silver tasks.
+- [x] **Superset 6.1.0** (`superset/Dockerfile`: + `clickhouse-connect` 0.15.1 and
+  `psycopg2-binary` 2.9.13 — the stock image ships no driver), module `compose/superset.yml`, host
+  port **8088**. Metadata in Postgres DB `superset` (role `superset`, created by `postgres-setup`);
+  one-shot `superset-init` (`superset/scripts/init.sh`, idempotent: `db upgrade`, admin user
+  created or its password reset to `.env`, `superset init`, `set-database-uri` for **ClickHouse
+  gold** as `superset_reader`). No Redis/Celery.
+- [ ] Incremental gold with the `_silver_updated_at` watermark (`ReplacingMergeTree`, design §8).
+- [ ] More models: `dim_date`, `fct_order_lines`, marts (revenue per day / per city).
+- [ ] Superset datasets + one dashboard (revenue per day and per city).
+
+**Verified 2026-11-06:** `clickhouse_reader` reads silver and nothing else; ClickHouse reads
+silver through `silver_pg` with matching values and times (1167 = source); `superset_reader`
+can't create anything and only sees schema `gold`; Superset (REST API) lists `gold.dim_users` /
+`gold.fct_orders` and runs a SQL Lab query (orders and revenue per day); `superset-init` re-run →
+"exists, resetting its password". End to end: generator 1 min → DAG with 5 tasks `success`,
+`dbt run` 2 models, `dbt test` 8/8 PASS, gold = source (1217 orders, 221 users). 29 containers,
+all healthy (Loki has no healthcheck); ClickHouse and Superset logs reach Loki.
+
+**Found on the way:**
+- `postgresql()` returns every silver column as `Nullable` (silver's source columns are nullable
+  on purpose), and ClickHouse refuses a nullable partition key — dropped the partition (not
+  needed at demo size) rather than forcing `assumeNotNull`, which would also have made the
+  `not_null` test meaningless.
+- Using a named collection needs the **`NAMED COLLECTION`** grant, which `access_management`
+  doesn't give, and XML-defined users (the image's admin) can't get grants through SQL:
+  `clickhouse/users.d/admin.xml` adds `named_collection_control` to the same user name — so the
+  admin name is fixed (`admin`, `CLICKHOUSE_ADMIN_USER` dropped).
+- The image's `config.d/docker_related_config.xml` holds `listen_host` — mount config files one by
+  one, not the whole directory. The `Listen [::]... failed` warnings are harmless (no IPv6 on
+  the Docker network).
+- `dbt debug` fails its `git` check (no git in the image) — only needed for dbt packages.
 
 **Done when:**
 - `dbt run` and `dbt test` pass from the DAG.

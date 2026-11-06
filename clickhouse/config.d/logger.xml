@@ -1,0 +1,10 @@
+<!-- Logs to stdout only, so Alloy -> Loki gets them (the image default also writes files under
+     /var/log/clickhouse-server, which nothing reads). -->
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>1</console>
+        <log remove="remove"/>
+        <errorlog remove="remove"/>
+    </logger>
+</clickhouse>

@@ -7,7 +7,8 @@ Inside the Docker network every service is reached by its service name (e.g. `ka
 `http://polaris:8181`), not `localhost`. From Windows (DataGrip, browser) the host ports below are
 reachable on `localhost` too: Docker Engine runs inside WSL and WSL2 forwards published ports.
 
-The stack has 25 services: 18 long-running ones and 7 one-shot jobs (see the end of this page).
+The stack has 28 services: 20 long-running ones and 8 one-shot jobs (see the end of this page), plus
+the on-demand `generator`.
 
 ## Services with a UI
 
@@ -17,6 +18,7 @@ The stack has 25 services: 18 long-running ones and 7 one-shot jobs (see the end
 | Grafana | 3000 | http://localhost:3000 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` |
 | Kafka UI | 8082 → 8080 | http://localhost:8082 | none (read-only: browse topics, Avro-decoded messages, Schema Registry, Kafka Connect) |
 | RustFS console | 9001 | http://localhost:9001/rustfs/console/ | `S3_ACCESS_KEY` / `S3_SECRET_KEY` |
+| Superset | 8088 | http://localhost:8088 | `SUPERSET_ADMIN_USER` / `SUPERSET_ADMIN_PASSWORD` (database **ClickHouse gold** is registered; browse it in SQL Lab) |
 | Spark master UI | 8090 → 8080 | http://localhost:8090 | — |
 | Spark worker UI | 8081 | http://localhost:8081 | — (links to each driver/executor's stdout/stderr; the same logs are in Grafana under `service=spark-job`) |
 | Trino web UI | 8080 | http://localhost:8080/ui/ | any user name, no password |
@@ -34,6 +36,7 @@ Backend services: no web UI, reached with a client (`psql`, S3 client, HTTP API,
 | Spark master RPC | 7077 | `spark://localhost:7077` | |
 | Spark master REST | 6066 | `http://localhost:6066` | Cluster-mode submit (used by Airflow) |
 | Trino (client) | 8080 | `docker exec trino trino` | Same port as the web UI |
+| ClickHouse (HTTP) | 8123 | `http://localhost:8123` (DataGrip: ClickHouse driver, port 8123) or `docker exec clickhouse clickhouse-client -u admin --password $CLICKHOUSE_ADMIN_PASSWORD` | Users: `admin` / `CLICKHOUSE_ADMIN_PASSWORD` (dbt), `superset_reader` / `SUPERSET_READER_PASSWORD` (SELECT on `gold.*`). The native port 9000 is internal only (9000 on the host is RustFS) |
 
 ## Services without a UI — internal only
 
@@ -77,12 +80,23 @@ docker run --rm --network lakehouse-project_lakehouse alpine:3.19 sh -c \
      nc -z -w 3 ${t%:*} ${t#*:} && echo "ok   $t" || echo "FAIL $t"; done'
 ```
 
+## After a reboot
+
+Nothing starts by itself (no service has a `restart:` policy — a temporary choice for this local
+setup, to be restored on an always-on server; see CLAUDE.md → Conventions): run
+`docker compose up -d` from the repo root; the `depends_on` chain brings everything up in order
+and the setup jobs re-run (idempotent). Debezium resumes from its slot, the sink from its Kafka
+offsets, silver from `config.etl_checkpoint`. Check: every service healthy except Loki (no
+healthcheck), both connectors `RUNNING`. Before shutting down, `docker compose stop` is cleaner
+than closing WSL with the stack running.
+
 ## One-shot jobs
 
 Run once at startup and exit; they have no port and no UI: `postgres-setup`, `source-db-setup`
 (applies `source/schema.sql`), `rustfs-setup`,
 `polaris-bootstrap`, `polaris-setup`, `airflow-init`, `connect-setup` (registers
-`connect/connectors/*.json` with Kafka Connect and waits until they are `RUNNING`).
+`connect/connectors/*.json` with Kafka Connect and waits until they are `RUNNING`), `superset-init`
+(metadata DB migration, admin user, roles, the **ClickHouse gold** database entry).
 `airflow-scheduler` is a long-running backend process, also without a UI or port.
 
 ## On demand (compose profile `generator`)
@@ -354,7 +368,36 @@ Iceberg commit and re-reads from there (tested: bronze rows = Kafka messages, no
 Step-by-step commands (source table → connectors → snapshot of existing rows via the Debezium
 signal table → bronze), and how to remove a table again: [add-source-table.md](add-source-table.md).
 
+## Checking gold
+
+Gold is rebuilt in full by the DAG's last two tasks: **`gold_dbt_run`** (dbt `run`: every model is
+`materialized: table`, built as a new table and swapped in) and **`gold_dbt_test`** (`unique` /
+`not_null` + `*_matches_silver`: gold count = current, non-deleted rows of silver). Their task logs
+show dbt's output (`OK created sql table model gold.fct_orders`, `PASS ...`).
+
+From the ClickHouse side (`docker exec clickhouse clickhouse-client -u superset_reader --password
+$SUPERSET_READER_PASSWORD`, or DataGrip on 8123):
+
+```sql
+SELECT count() FROM gold.fct_orders;                  -- = current, non-deleted orders in silver
+SELECT order_date, count() AS orders, sum(total_amount) AS revenue
+FROM gold.fct_orders GROUP BY order_date ORDER BY order_date;   -- order_date = Vietnam day
+-- silver straight from ClickHouse (admin only: needs the NAMED COLLECTION grant)
+SELECT count() FROM postgresql(silver_pg, table = 'orders') WHERE _is_current AND NOT _is_deleted;
+```
+
+From Superset: SQL Lab → database **ClickHouse gold** → schema `gold` (the only one
+`superset_reader` sees) → `dim_users`, `fct_orders`. Dashboards come later.
+
+Run dbt by hand (inside the scheduler, same environment as the DAG):
+
+```bash
+docker exec airflow-scheduler bash -c 'cd /opt/airflow/dbt && /opt/airflow/dbt-venv/bin/dbt build'
+```
+
+`dbt debug` reports `Error from git --help`: git is only needed for dbt packages (none here).
+
 ## Not built yet
 
-Planned by the [roadmap](roadmap.md), ports not assigned yet: ClickHouse, Superset, FastAPI + web
-page. Add them here when they land.
+Planned by the [roadmap](roadmap.md), ports not assigned yet: FastAPI + web page. Add them here
+when they land.

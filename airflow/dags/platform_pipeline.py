@@ -1,16 +1,19 @@
-"""DAG platform_pipeline (manual trigger): bronze -> silver (design §9).
+"""DAG platform_pipeline (manual trigger): bronze -> silver -> gold (design §9).
 
 silver_spark: submit spark/jobs/job_silver.py (bronze -> staging) through the Spark REST API.
 silver_apply: apply staging to silver as SCD2 and advance the checkpoints (Postgres, one
 transaction per table) — airflow/dags/lib/silver_apply.py.
 silver_verify: silver invariants + reconciliation with bronze at the checkpoint snapshot (Trino)
 — airflow/dags/lib/silver_verify.py.
+gold_dbt_run / gold_dbt_test: dbt (dbt/, own virtualenv) rebuilds the gold tables in ClickHouse
+from silver, then runs the dbt tests (incl. gold count = silver count).
 
 Param `table`: `all` (default) = every active table in config.etl_checkpoint; or one table,
-`users` / `silver.users`. From the CLI:
+`users` / `silver.users`. It limits the silver tasks only: gold is always rebuilt in full.
+From the CLI:
     airflow dags trigger platform_pipeline -c '{"table": "users"}'
 
-Later phases add ES sync and dbt after silver_apply.
+A later phase adds the ES sync next to the gold tasks.
 """
 
 from __future__ import annotations
@@ -18,6 +21,11 @@ from __future__ import annotations
 import pendulum
 from airflow.decorators import dag, task
 from airflow.models.param import Param
+from airflow.operators.bash import BashOperator
+
+# dbt runs from the bind-mounted project with the venv's binary; profile, target and log paths come
+# from the environment (DBT_PROFILES_DIR, DBT_TARGET_PATH, DBT_LOG_PATH in compose/airflow.yml)
+DBT = "cd /opt/airflow/dbt && /opt/airflow/dbt-venv/bin/dbt --no-use-colors"
 
 
 @dag(
@@ -36,7 +44,7 @@ from airflow.models.param import Param
             "or one table: users / silver.users",
         )
     },
-    tags=["silver"],
+    tags=["silver", "gold"],
 )
 def platform_pipeline():
     @task
@@ -79,8 +87,12 @@ def platform_pipeline():
         finally:
             conn.close()
 
+    gold_dbt_run = BashOperator(task_id="gold_dbt_run", bash_command=f"{DBT} run")
+    gold_dbt_test = BashOperator(task_id="gold_dbt_test", bash_command=f"{DBT} test")
+
     table = "{{ params.table }}"
-    silver_spark(table) >> silver_apply(table) >> silver_verify(table)
+    (silver_spark(table) >> silver_apply(table) >> silver_verify(table) >> gold_dbt_run)
+    gold_dbt_run >> gold_dbt_test
 
 
 platform_pipeline()

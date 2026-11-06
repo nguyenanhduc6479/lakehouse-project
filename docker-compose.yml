@@ -6,6 +6,8 @@ include:
   - compose/catalog.yml
   - compose/spark.yml
   - compose/trino.yml
+  - compose/clickhouse.yml
+  - compose/superset.yml
   - compose/airflow.yml
   - compose/monitoring.yml
 

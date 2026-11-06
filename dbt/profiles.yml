@@ -1,0 +1,15 @@
+# dbt connection to ClickHouse (gold). Runs inside the Airflow containers; values come from their
+# environment (compose/airflow.yml <- .env). Database `gold` is created by dbt if missing.
+lakehouse:
+  target: gold
+  outputs:
+    gold:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('CLICKHOUSE_HOST', 'clickhouse') }}"
+      port: 8123
+      user: admin
+      password: "{{ env_var('CLICKHOUSE_ADMIN_PASSWORD') }}"
+      schema: gold
+      secure: false
+      threads: 2

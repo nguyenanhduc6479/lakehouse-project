@@ -1,0 +1,71 @@
+# Superset: dashboards on gold (ClickHouse). Metadata in Postgres DB `superset`; reads ClickHouse as
+# the read-only user superset_reader. Single gunicorn server, no Redis/Celery (demo scale).
+# Logging for every container in this module: json-file (the Engine default) plus the compose
+# labels written into each line, so Alloy can tail /var/lib/docker/containers/*/*-json.log and know
+# which service a line belongs to — even for one-shot jobs that exit in under a second. Size-capped:
+# json-file is unbounded by default. Defined per module because YAML anchors don't cross `include`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    labels: "com.docker.compose.project,com.docker.compose.service"
+    max-size: "10m"
+    max-file: "3"
+
+x-superset-common: &superset-common
+  build:
+    context: ../superset
+    dockerfile: Dockerfile
+  image: custom-superset:6.1.0
+  environment: &superset-env
+    SUPERSET_CONFIG_PATH: /app/superset_config.py
+    SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    POSTGRES_DB_SUPERSET: ${POSTGRES_DB_SUPERSET}
+    SUPERSET_DB_USERNAME: ${SUPERSET_DB_USERNAME}
+    SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD}
+  networks: [lakehouse]
+
+services:
+  # One-shot: metadata DB migration, admin user, roles, ClickHouse database entry (idempotent).
+  superset-init:
+    <<: *superset-common
+    container_name: superset-init
+    logging: *default-logging
+    depends_on:
+      postgres-setup:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *superset-env
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      SUPERSET_READER_PASSWORD: ${SUPERSET_READER_PASSWORD}
+    volumes:
+      - ../superset/superset_config.py:/app/superset_config.py:ro
+      - ../superset/scripts:/scripts:ro
+    entrypoint: ["bash", "/scripts/init.sh"]
+
+  superset:
+    <<: *superset-common
+    container_name: superset
+    logging: *default-logging
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *superset-env
+      TZ: ${TZ}
+    volumes:
+      - ../superset/superset_config.py:/app/superset_config.py:ro
+    ports: ["8088:8088"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8088/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+      start_interval: 3s
+
+networks:
+  lakehouse:
+    driver: bridge

@@ -42,9 +42,11 @@ no HA, replicas, poolers or TLS.
   11 bytecode; the worker runs Java 11) writes `lakehouse.bronze.{users,orders,order_details}_cdc`,
   one commit/snapshot per ~60 s, exactly-once (verified through a Connect restart: bronze rows =
   Kafka offsets, and rebuilding current state from bronze equals the source); Spark (Iceberg 1.10.2)
-  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). Phase 5 is **done** (2026-11-04): DAG `platform_pipeline` (`silver_spark` → `silver_apply` → `silver_verify`)
+  reads them. `day(_ingested_at)` partitions are UTC days (00:00–07:00 Vietnam time = previous day). Phase 5 is **done** (2026-11-04): DAG `platform_pipeline` (`silver_spark` → `silver_apply` → `silver_verify` → `gold_dbt_run` → `gold_dbt_test`)
   builds SCD2 history in `data-platform.silver.*` from bronze (design §6.4; checks in
-  `docs/services.md` → "Checking silver"). **Next: phase 6 (gold — ClickHouse + dbt + Superset).**
+  `docs/services.md` → "Checking silver"). Phase 6 (gold) is **in progress**: step 1 done 2026-11-06 — ClickHouse + dbt + Superset wired
+  together, gold `dim_users` / `fct_orders` rebuilt in full by the DAG, Superset sees gold; next:
+  incremental (watermark), more models, dashboards (roadmap phase 6).
 - **Generator** (`source/generator.py` + `source/Dockerfile`, image `custom-generator:0.1.0`, Python 3.12, Faker 40.44, psycopg
   3.3): compose profile `generator`, so a plain `up` never starts it. Rate `GENERATOR_RATE` (`.env`).
   Pitfalls already fixed — keep them: the psycopg connection must be `autocommit=True` (otherwise
@@ -84,8 +86,17 @@ no HA, replicas, poolers or TLS.
   scratch DB `silver_apply_test` built from `postgres/schema.sql`, dropped
   afterwards), `tests/test_generator.py`; `conftest.py` has a local Spark
   fixture.
-- `dbt/` holds only an empty `dbt_project.yml`; dbt-clickhouse (profile + models) arrives in the
-  gold phase. `spark-thrift` and dbt-spark were removed (2026-11-02) — nothing uses Spark over JDBC.
+- **Gold** (`dbt/`, design §8): `profiles.yml` (ClickHouse `admin`, env vars), ephemeral
+  `models/staging/stg_*.sql` reading silver with `postgresql(silver_pg, table = '...')` (current,
+  non-deleted rows; timestamps cast to `DateTime64(6, 'Asia/Ho_Chi_Minh')`), gold tables
+  `models/gold/{dim_users,fct_orders}.sql` (`materialized: table` = full rebuild, `MergeTree`;
+  no partition — `postgresql()` makes every column `Nullable` and a nullable partition key is
+  refused), tests in `models/gold/schema.yml` + `tests/*_matches_silver.sql`. dbt runs from
+  `/opt/airflow/dbt-venv/bin/dbt` (own venv in the Airflow image, `airflow/dbt-requirements.txt`:
+  dbt-core 1.12.6, dbt-clickhouse 1.10.3, dbt-adapters 1.24.5), `DBT_TARGET_PATH` / `DBT_LOG_PATH`
+  under `/tmp`. By hand: `docker exec airflow-scheduler bash -c 'cd /opt/airflow/dbt &&
+  /opt/airflow/dbt-venv/bin/dbt build'` (`dbt debug`'s git check fails: no git, no packages).
+  `spark-thrift` and dbt-spark were removed (2026-11-02) — nothing uses Spark over JDBC.
 - **Python versions differ by place:** the `custom-spark` image runs **Python 3.8.10** (code must
   stay 3.8-compatible at runtime — `from __future__ import annotations` is what makes `str | None`
   hints OK), Airflow is 3.11, the host `venv/` is 3.11. Ruff's target is py311 except
@@ -102,7 +113,8 @@ no HA, replicas, poolers or TLS.
 ## Architecture (what exists now)
 
 The entry point `docker-compose.yml` only `include`s the modules under `compose/` (`infra.yml`, `source.yml`,
-`connect.yml`, `storage.yml`, `catalog.yml`, `spark.yml`, `trino.yml`, `airflow.yml`, `monitoring.yml`) and
+`connect.yml`, `storage.yml`, `catalog.yml`, `spark.yml`, `trino.yml`, `clickhouse.yml`, `superset.yml`,
+`airflow.yml`, `monitoring.yml`) and
 declares the shared network. Every service joins the bridge network **`lakehouse`** and reaches
 the others by service name. All credentials and tunables live in `.env` and are injected via
 `environment:` — don't hardcode them in compose files.
@@ -124,6 +136,25 @@ the others by service name. All credentials and tunables live in `.env` and are 
   e.g. the Iceberg sink's exactly-once commits). **Schema Registry** (cp 7.6.0,
   `http://schema-registry:8081`, internal only). **Elasticsearch 7.17** single node, security off
   (internal only) — the search layer.
+- **Gold** (`compose/clickhouse.yml`): **ClickHouse 26.8.36.3** (LTS), host port **8123** only (the
+  native 9000 stays internal — 9000 on the host is RustFS). Config files in `clickhouse/` are
+  mounted **one by one** (mounting `config.d/` would hide the image's `docker_related_config.xml`
+  with `listen_host`; after editing one: `docker compose up -d --force-recreate clickhouse`):
+  `config.d/logger.xml` (stdout only), `config.d/named_collections.xml` — **`silver_pg`** →
+  `postgres:5432/data-platform`, schema `silver`, Postgres role **`clickhouse_reader`**
+  (`CLICKHOUSE_READER_PASSWORD`; created and granted read-only on `silver` by `postgres-setup`,
+  default privileges for new tables) — `users.d/admin.xml` (gives the image-created `admin` the
+  `NAMED COLLECTION` right: `access_management` doesn't, and XML users can't be granted through
+  SQL — so the admin name is fixed to `admin`, password `CLICKHOUSE_ADMIN_PASSWORD`) and
+  `users.d/superset_reader.xml` (`SUPERSET_READER_PASSWORD`, `GRANT SELECT ON gold.*`). The
+  `Listen [::]... failed` warnings at start are harmless (no IPv6 on the network).
+  **Superset 6.1.0** (`compose/superset.yml`, `custom-superset:6.1.0` from `superset/Dockerfile`:
+  + `clickhouse-connect` 0.15.1, `psycopg2-binary` 2.9.13 — the stock image has no driver), host
+  port **8088**, config `superset/superset_config.py` (env only; no Redis/Celery). Metadata in
+  Postgres DB `superset` (role `superset`, `SUPERSET_DB_*`, created by `postgres-setup`). One-shot
+  `superset-init` (`superset/scripts/init.sh`, idempotent): `db upgrade`, admin
+  `SUPERSET_ADMIN_USER` created or its password reset to `.env`, `superset init`,
+  `set-database-uri` **ClickHouse gold** as `superset_reader`. No datasets/dashboards yet.
 - **CDC** (`compose/connect.yml`): **Kafka Connect** `custom-connect:7.6.0` from `connect/Dockerfile`
   (`cp-kafka-connect:7.6.0` + **Debezium Postgres 2.7.4.Final**, Maven Central tarball, SHA-1
   checked — the image runs **Java 11**, so Debezium 3.x (Java 17) is out). Multi-stage: stage
@@ -238,7 +269,7 @@ the others by service name. All credentials and tunables live in `.env` and are 
   Loki is distroless, so `alloy`'s healthcheck probes both via bash `/dev/tcp` (`CMD bash -c`, not
   `CMD-SHELL`).
 
-To be added by the roadmap: ClickHouse, Superset, FastAPI.
+To be added by the roadmap: FastAPI + web page (phase 7).
 
 ## Common commands
 
@@ -252,8 +283,8 @@ reachable from Windows on `localhost` (WSL2 forwarding), e.g. DataGrip on 5432/5
 
 ```bash
 docker compose config            # validate/merge the included compose files — first sanity check
-docker compose build             # build custom images (custom-spark, custom-airflow, custom-connect;
-                                 # custom-connect's first build compiles Iceberg: ~6.5 min)
+docker compose build             # build custom images (custom-spark, custom-airflow, custom-connect,
+                                 # custom-superset; custom-connect's first build compiles Iceberg: ~6.5 min)
 docker compose up -d --remove-orphans
 docker compose up -d <service>   # one service and its dependencies
 docker compose logs -f <service>
@@ -306,7 +337,7 @@ Catalog check: `docker exec trino trino --execute "SHOW SCHEMAS FROM lakehouse"`
 ### Key ports (host)
 
 RustFS S3 9000 / console 9001 · Polaris 8181 (unauthenticated `GET :8181/api/catalog/v1/config` → 401
-means it's up) · Spark master UI 8090, RPC 7077, REST 6066 · Spark worker 8081 · Trino 8080 · Kafka UI 8082 · Airflow 8085 · Grafana 3000 · Postgres 5432 · source-db 5433. **Not published**:
+means it's up) · Spark master UI 8090, RPC 7077, REST 6066 · Spark worker 8081 · Trino 8080 · Kafka UI 8082 · Airflow 8085 · Grafana 3000 · Postgres 5432 · source-db 5433 · ClickHouse HTTP 8123 · Superset 8088. **Not published**:
 Loki 3100, Alloy 12345, Kafka 9092/29092, Zookeeper 2181, Elasticsearch 9200, Schema Registry 8081,
 Kafka Connect 8083
 — Kafka's `PLAINTEXT_HOST://localhost:9092` listener is unreachable from the host until a `ports:`
@@ -334,6 +365,16 @@ entry is added.
   `spark/Dockerfile`) instead of adding a chown job. Only works for new/empty volumes.
 - **Healthcheck-gated startup**: use `condition: service_healthy` /
   `service_completed_successfully` in `depends_on`, so the chain doesn't race.
+- **No `restart:` policy on any service — temporary, local-only** (removed 2026-11-06 because the
+  stack runs on a laptop that is shut down and booted daily; on an always-on server, e.g. a real
+  Kubernetes deployment, restore restart policies — `restart: unless-stopped`, or k8s
+  `restartPolicy` with readiness probes / init containers for ordering). After an unclean shutdown (WSL
+  closed with the stack running → containers exit 143), the Docker daemon restarts every
+  `on-failure` container by itself at boot, **without compose's `depends_on` order**:
+  `schema-registry` came up alone, crash-looped on `No resolvable bootstrap urls` (no `kafka`
+  yet), and the following `docker compose up -d` stopped at it, so `kafka-connect`/`kafka-ui`
+  never started. Ordering comes from `depends_on` + healthchecks; after a reboot run
+  `docker compose up -d` (before shutting down, prefer `docker compose stop`).
 - **Every new service** gets `logging: *default-logging` (each `compose/*.yml` defines the
   `x-logging` anchor; anchors don't cross `include`) — without it Alloy drops its logs — and must
   wait for `alloy` (directly if it has no other dependency, otherwise through its dependencies).

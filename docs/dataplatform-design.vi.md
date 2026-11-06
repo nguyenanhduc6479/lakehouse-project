@@ -71,9 +71,9 @@ nguồn bên ngoài).
 | Trino | SQL trên bronze (kiểm tra, debug, kịch bản test) | Đã có trong stack; không nằm trên luồng dữ liệu chính |
 | PySpark | Bronze → silver (SCD Type 2) | Spark cluster hiện có, submit qua REST 6066; `spark.master` được đặt trong `spark-defaults.conf` để job submit qua REST chạy trên executor thật; log của driver/executor hiện trên Grafana (`service=spark-job`) |
 | Postgres (silver, Postgres 16) | Các bảng silver, đồng thời là database của web app | Database `data-platform` (`POSTGRES_DB`) trên service `postgres` hiện có, bên cạnh `airflow` và `polaris`; Airflow kết nối tới nó qua `postgres_conn` |
-| ClickHouse | Gold (OLAP): lưu các bảng gold, phục vụ Superset và API | Một node |
-| dbt-clickhouse | Silver → gold | Chạy trong container Airflow (`./dbt`); thêm vào `airflow/requirements.txt` ở phase gold — cần kiểm tra nó resolve được với constraints của Airflow 2.9.2 |
-| Superset | Dashboard | Image tự build thêm driver `clickhouse-connect` (image gốc không có) |
+| ClickHouse | Gold (OLAP): lưu các bảng gold, phục vụ Superset và API | 26.8 LTS, một node, HTTP 8123; user `admin` (dbt) và `superset_reader` (SELECT trên `gold.*`); đọc silver qua named collection `silver_pg` bằng role Postgres chỉ đọc `clickhouse_reader` |
+| dbt-clickhouse | Silver → gold | dbt-core 1.12 + dbt-clickhouse 1.10 trong virtualenv riêng của image Airflow (`/opt/airflow/dbt-venv`, `airflow/dbt-requirements.txt`) — tách khỏi constraints của Airflow; project `./dbt` |
+| Superset | Dashboard | 6.1, image tự build thêm `clickhouse-connect` + `psycopg2` (image gốc không có driver nào); metadata trong DB Postgres `superset`; job one-shot `superset-init` đăng ký **ClickHouse gold** |
 | Elasticsearch 7.17 | Tìm kiếm cho web app | Đã có trong `compose/infra.yml`; Python client phải là `elasticsearch` 7.x (8.x từ chối server 7.x) |
 | FastAPI | Đường đọc duy nhất của web app | ES cho tìm kiếm, silver cho chi tiết/lịch sử, gold cho số liệu |
 | Airflow | Điều phối các bước batch | Chỉ kích hoạt thủ công; tự chạy các task nhẹ (SQL trên Postgres, ES sync); các transform nặng chạy trong Spark và dbt |
@@ -566,6 +566,10 @@ Watermark là `_silver_updated_at` lớn nhất đã xử lý, lưu trong `confi
 cấu trúc document thì cứ tạo lại index (demo — không chuyển alias).
 
 ## 8. Gold — ClickHouse
+
+**Hiện trạng (2026-11-06):** các gold model đang dựng lại toàn bộ (`materialized: table` trên
+`MergeTree`) — `dim_users`, `fct_orders` từ `stg_users` / `stg_orders` dạng ephemeral, đọc các dòng
+hiện tại, chưa bị xóa của silver. Thiết kế incremental dưới đây làm tiếp sau.
 
 dbt-clickhouse dựng gold thẳng từ silver mà không cần bản sao trung gian. Các staging model là
 `ephemeral` và đọc silver qua table function `postgresql()` (thông tin kết nối nằm trong một

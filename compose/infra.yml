@@ -58,6 +58,10 @@ services:
       POSTGRES_DB_POLARIS: ${POSTGRES_DB_POLARIS}
       POLARIS_ADMIN_USERNAME: ${POLARIS_ADMIN_USERNAME}
       POLARIS_ADMIN_PASSWORD: ${POLARIS_ADMIN_PASSWORD}
+      POSTGRES_DB_SUPERSET: ${POSTGRES_DB_SUPERSET}
+      SUPERSET_DB_USERNAME: ${SUPERSET_DB_USERNAME}
+      SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD}
+      CLICKHOUSE_READER_PASSWORD: ${CLICKHOUSE_READER_PASSWORD}
     command: ["bash", "/postgres/scripts/init.sh"]
     networks: [lakehouse]
 
@@ -124,7 +128,11 @@ services:
     image: confluentinc/cp-schema-registry:7.6.0
     container_name: schema-registry
     logging: *default-logging
-    restart: on-failure
+    # No restart policy — TEMPORARY, for this local laptop setup only (like every service): after an
+    # unclean shutdown the Docker daemon would restart an on-failure container on its own at boot,
+    # before its dependencies exist (compose's depends_on order doesn't apply), and its crash loop
+    # then blocked `compose up`. On an always-on server (e.g. a real Kubernetes deployment), put
+    # restart policies back (`restart: unless-stopped` / k8s restartPolicy + readiness probes).
     depends_on:
       kafka:
         condition: service_healthy

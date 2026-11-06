@@ -1,0 +1,5 @@
+# dbt for the gold layer (ClickHouse), installed into /opt/airflow/dbt-venv (see Dockerfile).
+# dbt-clickhouse 1.10.3 needs dbt-adapters < 1.25; dbt-core 1.12.6 needs >= 1.24.5.
+dbt-core==1.12.6
+dbt-adapters==1.24.5
+dbt-clickhouse==1.10.3

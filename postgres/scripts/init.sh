@@ -87,6 +87,14 @@ else
     echo "warning: missing polaris vars."
 fi
 
+# 2.3. superset (metadata DB)
+if [ -n "$SUPERSET_DB_USERNAME" ] && [ -n "$POSTGRES_DB_SUPERSET" ] && [ -n "$SUPERSET_DB_PASSWORD" ]; then
+    create_login "$SUPERSET_DB_USERNAME" "$SUPERSET_DB_PASSWORD"
+    create_database "$POSTGRES_DB_SUPERSET" "$SUPERSET_DB_USERNAME"
+else
+    echo "warning: missing superset vars."
+fi
+
 # 3. data-platform DB: config + silver schemas (idempotent DDL)
 echo "applying /postgres/schema.sql to database '$PGDATABASE'..."
 output=$(psql -X -q -v ON_ERROR_STOP=1 -h postgres -f /postgres/schema.sql 2>&1)
@@ -97,6 +105,25 @@ if [ $exit_code -ne 0 ]; then
     exit 1
 fi
 echo "  -> schema applied."
+
+# 4. read-only role ClickHouse reads silver with (named collection silver_pg, gold phase).
+# Granted here rather than in schema.sql, which stays role-agnostic (the silver tests build a
+# scratch DB from it). Default privileges cover silver tables created later by this user.
+if [ -n "$CLICKHOUSE_READER_PASSWORD" ]; then
+    create_login clickhouse_reader "$CLICKHOUSE_READER_PASSWORD"
+    output=$(psql -X -q -v ON_ERROR_STOP=1 -h postgres \
+        -c "GRANT USAGE ON SCHEMA silver TO clickhouse_reader" \
+        -c "GRANT SELECT ON ALL TABLES IN SCHEMA silver TO clickhouse_reader" \
+        -c "ALTER DEFAULT PRIVILEGES IN SCHEMA silver GRANT SELECT ON TABLES TO clickhouse_reader" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "failed to grant silver to clickhouse_reader"
+        echo "error details: $output"
+        exit 1
+    fi
+    echo "  -> clickhouse_reader can read schema silver."
+else
+    echo "warning: missing CLICKHOUSE_READER_PASSWORD."
+fi
 
 echo "-----------------------------------------------------"
 echo "all initialization steps completed successfully!"
